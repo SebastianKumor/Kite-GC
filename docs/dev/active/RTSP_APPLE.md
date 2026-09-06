@@ -1,5 +1,39 @@
 # RTSP Apple sink — handover brief for the macOS/iOS session (P3)
 
+> **PROGRESS (2026-09-07, branch `feat/rtsp-apple`, built from the Windows session against Marc's macOS
+> Sequoia VM over SSH — not by Sebastian):** **Stages A–C done on macOS**: H.264 and HEVC decode into
+> `AVSampleBufferDisplayLayer` under the transparent WKWebView, verified in-app (OBS HEVC 720p60 from the
+> LAN, MediaMTX/ffmpeg H.264 720p30 on loopback; 60 fps reported, ~9 % CPU for the whole app with
+> VideoToolbox in SOFTWARE — the VM has no GPU, hardware decode remains Sebastian's check on real hardware).
+> **Stage D (iOS) not started.** Deltas from the brief below:
+> - `apple_host.rs` is **macOS-only** for now (AppKit); the UIKit half comes with Stage D. The container
+>   NSView is added `positioned: below, relativeTo: nil` (bottom of the sibling order) — no need to locate
+>   the WKWebView. The sink's layer is created ON the main thread inside `host::attach(make)` (closure
+>   constructor, like `linux_host::attach`) — an off-main creation + `SendLayer` wrapper was tried first
+>   and dropped: edition-2021 closures capture struct fields individually and defeat such wrappers.
+> - **`macOSPrivateApi: true` is required** next to `transparent: true` in `tauri.macos.conf.json`; without
+>   it wry prints "The window is set to be transparent but the macos-private-api is not enabled" and the
+>   WebView stays opaque. Window shadow/corners unaffected (undecorated window).
+> - API generation: the direct layer methods (`enqueueSampleBuffer`/`flush`/`status`/`error`/
+>   `requiresFlushToResumeDecoding`) — our minimum is macOS 13; `sampleBufferRenderer` is 14+. Marked
+>   `#![allow(deprecated)]` with the reason.
+> - Pacing depths 1–3 use the layer's **control timebase** (host clock, rate 1, re-anchored by the Android
+>   `Pacing` logic in 90 kHz ticks); depth 0 = `kCMSampleAttachmentKey_DisplayImmediately`.
+> - Parameter sets: newest instance per type (VPS/SPS/PPS), description rebuilt only when bytes change,
+>   `picture_size()` = `CMVideoFormatDescriptionGetPresentationDimensions(…, cleanAperture: true)`.
+> - **macOS Local Network trap for DEV builds** (Sequoia): the unbundled `target/debug/kite-gc` sometimes gets
+>   `No route to host (os error 65)` to LAN hosts (RTSP and MAVLink alike) while a shell reaches them;
+>   Marc's workaround: run the release app once, quit, start dev again. Loopback sources unaffected.
+> - **Finding to measure on real hardware:** with the video in the panel or the floating window the VM's
+>   WindowServer sat at 210–235 % CPU and the VNC session crawled (one frame per 6–8 s); with the video
+>   swapped to fullscreen it dropped to a usable ~2 fps. Best explanation: the panel's glass
+>   (`backdrop-filter: blur`) stays live on WebKit and re-samples the 60 Hz video layer beneath it in the
+>   software compositor. Metal should absorb that; if Sebastian still measures a WindowServer delta on
+>   hardware, drop the blur on a panel while it hosts a native sink (Windows loses it there anyway).
+> - Dev loop that worked: edit on Windows, `scp` into `~/src/Kite-GC`, `cargo check` over SSH (~10 s),
+>   `just dev` launched detached (`nohup … < /dev/null & disown`), KiteShot screenshots.
+
+
 > Created 2026-09-01 on the Windows machine, after P2.1 (Windows, PR #85), P2.2 (Android,
 > PR #88) and P2.3 (Linux, PR #89) all merged into `development`. This file is the COMPLETE
 > briefing for a Claude session on the Mac: what exists, what to build, in which order, and

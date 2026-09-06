@@ -29,6 +29,10 @@ pub mod linux_host;
 /// Linux GStreamer H264/HEVC sink into that host (MOBILE_RTSP.md P2.3).
 #[cfg(target_os = "linux")]
 pub mod linux_sink;
+#[cfg(target_os = "macos")]
+pub mod apple_host;
+#[cfg(target_os = "macos")]
+pub mod apple_sink;
 
 pub use mediamtx::MediaMtx;
 pub use mjpeg_server::MjpegServer;

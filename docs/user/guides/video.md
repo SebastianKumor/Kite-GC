@@ -24,9 +24,9 @@ is remembered between sessions.
     nothing should be converted (see the
     [platform notes](#platform-notes-what-to-expect-per-operating-system)).
     **HEVC/H.265** plays wherever the **Kite RTSP client** does the decoding: always on **Android**,
-    and on **Windows** and **Linux** with the *Native RTSP client* toggle on (hardware decode; Windows
-    additionally needs the free "HEVC Video Extensions" from the Microsoft Store). On macOS, HEVC is
-    not available.
+    and on **Windows**, **Linux** and **macOS** with the *Native RTSP client* toggle on (hardware
+    decode; Windows additionally needs the free "HEVC Video Extensions" from the Microsoft Store).
+    macOS is the one platform whose classic engine path plays HEVC as well.
 
     Other codecs — VP8, VP9, AV1 — are **not supported**. A stream Kite cannot play usually shows up
     as an endless *"Reconnecting…"* rather than a clear error. If you need one of them, please open a
@@ -91,8 +91,8 @@ The RTSP source has a small **connection manager** built in:
   costs exactly that much extra latency, so leave it at 0 when the picture is already smooth. The
   setting takes effect immediately on the running stream and is remembered.
 - **Native RTSP client (experimental)** — Kite's own built-in stream client: no helper downloads,
-  UDP-first connection with automatic TCP fallback, and native hardware H.264/HEVC decode on Windows
-  and Linux (Android always uses it; there is no toggle there). Recommended on Linux — see the
+  UDP-first connection with automatic TCP fallback, and native hardware H.264/HEVC decode on Windows,
+  Linux and macOS (Android always uses it; there is no toggle there). Recommended on Linux — see the
   [platform notes](#platform-notes-what-to-expect-per-operating-system). If a particular source
   misbehaves with it, switch it off to fall back to the classic engine path.
 
@@ -193,6 +193,13 @@ stack, so a network stream is played directly by the system's hardware-accelerat
 low-CPU, low-latency feed is important to you — and especially if you plan to fly with it — those are
 the platforms we can most confidently recommend. For RTSP network streams, Linux joins them once
 the **Native RTSP client** is switched on — see below.
+
+**On macOS both RTSP routes are available.** The classic engine plays H.264 *and* HEVC directly (the
+macOS browser engine is the only one that accepts HEVC on that path), and the **Native RTSP client**
+toggle switches to Kite's own client: H.264 and HEVC are decoded by the system's VideoToolbox and
+drawn straight into the video area — no helper programs, UDP-first with TCP fallback, mirror and
+rotate live. Either route is fine; the native one skips the helper download and the local relay leg.
+The detached Video Window stays Windows-only.
 
 **On Linux, switch on the *Native RTSP client* for network streams.** With that toggle (Video panel →
 RTSP section) Kite plays RTSP itself: **H.264 and HEVC go straight into the machine's hardware
