@@ -32,8 +32,9 @@ below. The release you are reading the docs for is expanded; click an older vers
 
     ??? info "Native RTSP video client with hardware decode"
         RTSP video no longer needs the external video engine: Kite ships its **own RTSP client** and
-        decodes H.264/H.265 with the **operating system's hardware decoder** on Windows, Android and
-        Linux — lower latency, a fraction of the CPU load, and rock-solid reconnects. [#85] · [#88] · [#89]
+        decodes H.264/H.265 with the **operating system's hardware decoder** on Windows, Android,
+        Linux and macOS — lower latency, a fraction of the CPU load, and rock-solid reconnects.
+        [#85] · [#88] · [#89] · [#126]
 
     ??? info "Telemetry API — live telemetry for other programs"
         Kite can now **serve its live telemetry as JSON** to anything that can read it: an NDJSON
@@ -73,7 +74,7 @@ below. The release you are reading the docs for is expanded; click an older vers
     - **iPhone & iPad support** — native iOS/iPadOS build: phone/tablet layout, touch RC, BLE,
       Wi-Fi MAVLink. Contributed by Sebastian Kumor. [#16]
     - **Native RTSP video client** — Kite's own RTSP client with OS hardware decode (H.264/H.265)
-      on Windows [#85], Android [#88] and Linux [#89].
+      on Windows [#85], Android [#88], Linux [#89] and macOS [#126].
     - **Unobstructed fullscreen video** — aspect-exact video box with a blurred follow-map
       backdrop. [#90]
     - **PX4 ULog import** — the logbook imports `.ulg` flash/SD logs, split into flights like any
@@ -147,3 +148,4 @@ below. The release you are reading the docs for is expanded; click an older vers
 [#111]: https://github.com/b14ckyy/Kite-GC/pull/111
 [#112]: https://github.com/b14ckyy/Kite-GC/pull/112
 [#123]: https://github.com/b14ckyy/Kite-GC/pull/123
+[#126]: https://github.com/b14ckyy/Kite-GC/pull/126
