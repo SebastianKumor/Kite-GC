@@ -448,14 +448,18 @@
   const rightAvailUnits  = $derived(Math.max(0, (sideDockH - 2 * DOCK_PAD) / sidePxPerUnit));
 
   let appVersion = $state("...");
-  // iOS has no serial/BLE, so the iPad build defaults to Wi-Fi MAVLink (UDP 14550, the MAVLink
-  // convention). Desktop keeps its serial/MSP defaults.
+  // MAVLink is the default protocol everywhere: the common ground station setup is a telemetry
+  // radio, which is MAVLink over serial, and it is also the only protocol the control panel
+  // supports. iOS has no serial or BLE, so the iPad build reaches it over Wi-Fi (UDP 14550, the
+  // MAVLink convention) while desktop keeps serial.
   let selectedTransport = $state<TransportType>(isMobile ? 'udp' : 'serial');
-  let selectedProtocol = $state<ProtocolType>(isMobile ? 'mavlink' : 'msp');
+  let selectedProtocol = $state<ProtocolType>('mavlink');
   let selectedPort = $state("");
   let selectedBaud = $state(115200);
   let tcpHost = $state("192.168.1.1");
-  let tcpPort = $state(isMobile ? 14550 : 5761);
+  // 14550 on both: the network default follows the default protocol, which is now MAVLink. Picking
+  // MSP or a different transport re-defaults the port (see ConnectionControls).
+  let tcpPort = $state(14550);
   let selectedBleDevice = $state("");
   let bleDeviceList = $state<BleDeviceInfo[]>([]);
   let isBleScanning = $state(false);
@@ -918,7 +922,12 @@
   const saved = get(settings);
   selectedPort = saved.lastPort;
   selectedBaud = saved.lastBaud;
-  selectedProtocol = (saved.lastProtocol === 'mavlink' ? 'mavlink' : 'msp') as ProtocolType;
+  // Restore any protocol we actually support, falling back to the MAVLink default rather than to
+  // MSP: an unrecognised or missing stored value should land on the same protocol a fresh install
+  // gets. 'telemetry' used to be silently rewritten to MSP here.
+  selectedProtocol = (saved.lastProtocol === 'msp' || saved.lastProtocol === 'telemetry'
+    ? saved.lastProtocol
+    : 'mavlink') as ProtocolType;
   // Restore the full last-used connection path so nothing has to be re-entered. A serial value is only
   // honoured where serial ports exist (iOS has none — a value synced over from a desktop is ignored);
   // TCP/UDP/BLE are valid everywhere.

@@ -70,6 +70,25 @@
     ports.some((p) => p.path === selectedPort && p.port_type === 'bluetooth-spp'),
   );
 
+  // ── Network port defaults ──────────────────────────────────────────
+  // Each protocol/transport pair has one conventional port: MAVLink is UDP 14550 or TCP 5760 (what
+  // SITL and mavlink-router listen on), MSP is TCP 5761 (the INAV SITL MSP port). Changing either
+  // selector re-defaults the port, but only when it still holds one of these known values, so a
+  // hand-typed port (e.g. SITL 5762) is never clobbered.
+  const NET_DEFAULTS: Record<string, number> = {
+    'mavlink:udp': 14550, 'mavlink:tcp': 5760,
+    'telemetry:udp': 14550, 'telemetry:tcp': 5760,
+    'msp:udp': 14550, 'msp:tcp': 5761,
+  };
+  const KNOWN_PORTS = [14550, 5760, 5761];
+
+  function redefaultPort() {
+    if (selectedTransport !== 'tcp' && selectedTransport !== 'udp') return;
+    if (!KNOWN_PORTS.includes(tcpPort)) return;
+    const next = NET_DEFAULTS[`${selectedProtocol}:${selectedTransport}`];
+    if (next) tcpPort = next;
+  }
+
   let editingBt = $state(false);
   let btNameDraft = $state('');
 
@@ -101,17 +120,14 @@
   <SegmentedToggle
     options={[{ value: 'msp', label: 'MSP' }, { value: 'mavlink', label: 'MAVLink' }, { value: 'telemetry', label: 'Telemetry' }]}
     value={selectedProtocol}
-    onchange={(v) => (selectedProtocol = v as ProtocolType)}
+    onchange={(v) => {
+      selectedProtocol = v as ProtocolType;
+      redefaultPort();
+    }}
   />
 
-  <!-- Switching between TCP/UDP flips the port between the two known defaults (TCP 5761 ⇄ UDP 14550
-       = the MAVLink convention) — a custom port (e.g. SITL 5762) is left untouched.
-       Protocol-independent (MSP has no standard network port). -->
   <select class="tb-select transport-select" bind:value={selectedTransport}
-    onchange={() => {
-      if (selectedTransport === 'udp' && tcpPort === 5761) tcpPort = 14550;
-      else if (selectedTransport === 'tcp' && tcpPort === 14550) tcpPort = 5761;
-    }}>
+    onchange={redefaultPort}>
     <!-- Serial is a capability, not a form factor: desktop and Android (USB host / OTG) have
          it, iOS does not. BLE and TCP/UDP exist everywhere. -->
     {#if hasSerialPorts}

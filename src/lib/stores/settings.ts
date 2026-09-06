@@ -420,10 +420,10 @@ const STORAGE_KEY = 'kite-gc-settings';
 const defaults: AppSettings = {
   lastPort: '',
   lastBaud: 115200,
-  lastProtocol: 'msp',
+  lastProtocol: 'mavlink',
   lastTransport: 'serial',
   lastHost: '192.168.1.1',
-  lastTcpPort: 5761,
+  lastTcpPort: 14550,
   lastBleDevice: '',
   btPortNames: {},
   map: {
