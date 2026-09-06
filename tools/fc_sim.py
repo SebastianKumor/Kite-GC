@@ -1074,9 +1074,13 @@ def run_mavlink(args):
         def p(n, default=0.0):
             return float(f.get(f'param{n}', default) or 0.0)
 
-        # COMMAND_INT carries the position in x/y as 1e7 ints; COMMAND_LONG uses param5/6/7.
+        # COMMAND_INT carries the position in its own x/y/z fields (x/y as 1e7 ints, z in metres);
+        # COMMAND_LONG has no such fields and puts the same three in param5/6/7. Reading param7 for
+        # the COMMAND_INT altitude leaves it at 0, which every caller here reads as "keep the
+        # current altitude", so a reposition would be ACCEPTED and then flown at the wrong height.
         if is_int:
-            tlat, tlon, talt = int(f.get('x', 0)) / 1e7, int(f.get('y', 0)) / 1e7, p(7)
+            tlat, tlon, talt = (int(f.get('x', 0)) / 1e7, int(f.get('y', 0)) / 1e7,
+                                float(f.get('z', 0.0) or 0.0))
         else:
             tlat, tlon, talt = p(5), p(6), p(7)
 
