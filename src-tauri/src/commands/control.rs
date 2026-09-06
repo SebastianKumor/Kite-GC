@@ -127,6 +127,7 @@ pub fn mav_reposition(
     ground_speed: Option<f32>,
     yaw: Option<f32>,
     loiter_radius: Option<f32>,
+    amsl_offset: Option<f32>,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     let (cmd_tx, fc_sysid) = mav_handle(&state)?;
@@ -138,16 +139,10 @@ pub fn mav_reposition(
         loiter_radius.unwrap_or(0.0),
         yaw.unwrap_or(f32::NAN),
     ];
-    control::send_command_int(
-        &cmd_tx,
-        fc_sysid,
-        MavFrame::MAV_FRAME_GLOBAL_RELATIVE_ALT,
-        MavCmd::MAV_CMD_DO_REPOSITION,
-        params,
-        lat,
-        lon,
-        alt,
-    )
+    // `amsl_offset` (AMSL minus relative altitude, from live telemetry) lets the frame fall back to
+    // MAV_FRAME_GLOBAL for firmware that rejects the relative one — INAV's MAVLink port takes only
+    // GLOBAL. See `control::reposition`.
+    control::reposition(&cmd_tx, fc_sysid, params, lat, lon, alt, amsl_offset)
 }
 
 /// Change target speed via `MAV_CMD_DO_CHANGE_SPEED`. `speed_type`: 0 = airspeed, 1 = groundspeed.

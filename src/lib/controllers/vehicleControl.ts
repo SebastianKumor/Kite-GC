@@ -221,6 +221,18 @@ export function changeSpeed(speed: number, airspeed: boolean): Promise<boolean> 
   return runCommand('changeSpeed', 'mav_change_speed', { speedType: airspeed ? 0 : 1, speed });
 }
 
+/** Offset from the relative altitude the UI works in (metres above home) to AMSL, taken from live
+ *  telemetry rather than a stored home altitude. The backend needs it only to retry a reposition in
+ *  MAV_FRAME_GLOBAL when the firmware rejects the relative frame — INAV's MAVLink port accepts no
+ *  other frame, and it never sends HOME_POSITION, so this is the only source of the offset on that
+ *  link. Null until both altitudes have arrived, which suppresses the retry rather than guessing. */
+function amslOffset(): number | null {
+  const tel = get(telemetry);
+  if (tel.fixType < 2) return null;
+  if (tel.altMsl === 0 && tel.altitude === 0) return null;
+  return tel.altMsl - tel.altitude;
+}
+
 /** Change the active target altitude — repositions to the EXISTING Guided target (the loiter centre)
  *  at the new altitude, so only the height changes. Falling back to the vehicle's momentary position
  *  would move a fixed-wing's loiter centre to wherever it currently is on its circle, breaking it out
@@ -243,6 +255,7 @@ export function changeAlt(alt: number): Promise<boolean> {
     groundSpeed: p.speed,
     yaw: null,
     loiterRadius: p.loiterRadius,
+    amslOffset: amslOffset(),
   });
 }
 
@@ -386,6 +399,7 @@ export async function repositionTo(lat: number, lon: number, p: GuidedParams): P
     groundSpeed: p.speed,
     yaw: p.yaw,
     loiterRadius: p.loiterRadius,
+    amslOffset: amslOffset(),
   });
   if (ok) guidedTarget.set({ lat, lon }); // drive the map's loiter-target marker
   return ok;
