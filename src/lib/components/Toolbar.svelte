@@ -345,6 +345,12 @@
     gap: 12px;
     min-width: 0;
     overflow: hidden;
+    /* Auto margins, not `space-between` alone, place the three groups: on macOS the traffic lights
+       are a fourth flex child in front of this one, and space-between would hand a third of the free
+       room to the gap between the dots and the logo — the logo drifted towards the centre. With the
+       free room absorbed by these margins the dots stay glued to the logo and the centre group is
+       still centred between left and right on every platform. */
+    margin-right: auto;
   }
 
   .toolbar-center {
@@ -353,6 +359,7 @@
     gap: 10px;
     min-width: 0;
     overflow: hidden;
+    margin: 0 auto; /* see .toolbar-left */
   }
 
   /* Keep every child at its natural size so the group clips as a whole instead of squeezing its
