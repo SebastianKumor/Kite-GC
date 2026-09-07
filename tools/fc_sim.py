@@ -2,11 +2,14 @@
 
 One process, three combinations. `--firmware ardupilot` is an ArduPilot board speaking MAVLink over
 UDP; `--firmware inav` is an INAV board speaking MSP over TCP or UDP; `--firmware inav --protocol
-mavlink` is the same INAV board on its own MAVLink port, which supports far less than ArduPilot's
-and is reproduced here exactly as INAV 9.1 implements it. All three drive the same airframe model
-in this file, so a plane flies identically and only the wire protocol differs. Everything Kite
-consumes is covered end to end: the handshake, live telemetry, arming, flight modes, guided
-reposition, missions, parameters or settings, and direct RC stick control. No third-party packages.
+mavlink` is the same INAV board on its own MAVLink port, which supports far less than ArduPilot's.
+Everything Kite consumes is covered end to end: the handshake, live telemetry, arming, flight modes,
+guided reposition, missions, parameters or settings, and direct RC stick control. No third-party
+packages.
+
+Both stacks are modelled on their current master, not on any released version: ArduPlane 4.8.0-dev
+and INAV 9.1.0. Parameter names, defaults, message sets and command handling all come from those
+trees, so where a behaviour changed between releases only the current one is reproduced.
 
 MAVLink message layouts, CRC_EXTRA seeds and enum values are all derived at runtime from the
 MAVLink dialect XML, so nothing here can drift from the dialect the app links. MSP layouts follow
@@ -36,7 +39,7 @@ Usage: python3 tools/fc_sim.py [--firmware ardupilot|inav] [--protocol mavlink|m
                refuse every guided target
   --chatter    ArduPilot only: emit a periodic STATUSTEXT nag (exercises the toast de-dup)
   --defs       MAVLink only: path to ardupilotmega.xml (default: the vendored mavlink crate)
-  --version    INAV only: the firmware version to report (default 9.1.0; MAVLink commands need 9.0)
+  --version    INAV only: the firmware version to report (default 9.1.0, INAV master)
   --verbose    log every command, mission exchange and stream re-rate
 
 The airframe is a point mass with turn-rate, climb-rate and acceleration limits rather than a
@@ -54,7 +57,7 @@ RC_CHANNELS. DO_VTOL_TRANSITION is DENIED because Q_ENABLE is 0, and anything no
 answered MAV_RESULT_UNSUPPORTED rather than a fake success.
 
 INAV over MAVLink (--firmware inav --protocol mavlink) is deliberately poorer than ArduPilot, and
-all of this is what telemetry/mavlink.c does in 9.1 rather than a simplification:
+all of this is what telemetry/mavlink.c does on master rather than a simplification:
   - COMMAND_LONG is an unfinished TODO in the firmware, so every command sent that way (arm,
     disarm, mode, takeoff, land, RTL, change speed, set home) is dropped with no ACK at all.
   - COMMAND_INT handles exactly one command, DO_REPOSITION, and only with frame MAV_FRAME_GLOBAL,
@@ -349,6 +352,13 @@ def offset_m(lat, lon, north, east):
 # else is answered DENIED rather than silently accepted.
 PLANE_MODES = {0: 'manual', 1: 'circle', 2: 'stabilize', 5: 'fbwa', 6: 'fbwb', 7: 'cruise',
                10: 'auto', 11: 'rtl', 12: 'loiter', 13: 'takeoff', 15: 'guided'}
+# The rest of ArduPlane's Mode::Number (ArduPlane/mode.h). Named but not flown: a DO_SET_MODE for
+# one of these is a mode a real board would accept, so answering DENIED is the honest reply and
+# quietly renumbering it would be worse. Kite's own plane table is missing AUTOLAND = 26.
+PLANE_MODES_UNSIMULATED = {3: 'training', 4: 'acro', 8: 'autotune',
+                           14: 'avoid_adsb', 16: 'initialising', 17: 'qstabilize', 18: 'qhover',
+                           19: 'qloiter', 20: 'qland', 21: 'qrtl', 22: 'qautotune', 23: 'qacro',
+                           24: 'thermal', 25: 'loiter_alt_qland', 26: 'autoland'}
 COPTER_MODES = {0: 'stabilize', 2: 'althold', 3: 'auto', 4: 'guided', 5: 'loiter', 6: 'rtl',
                 7: 'circle', 9: 'land'}
 
@@ -359,19 +369,49 @@ PROFILES = {
     'copter': dict(mav_type='MAV_TYPE_QUADROTOR', modes=COPTER_MODES,
                    auto_mode=3, loiter_mode=5, rtl_mode=6, land_mode=9, guided_mode=4,
                    radius=200.0, speed=10.0, alt=80.0, cells=3, nominal_v=12.6, throttle=48,
-                   wind=0.0, fw='ArduCopter V4.5.7', fw_ver=(4, 5, 7),
-                   # A copter can stop and hover, turns on the spot and climbs briskly.
-                   bank_max=math.radians(35), yaw_rate=math.radians(90), climb=4.0, sink=2.5,
-                   accel=3.0, wp_radius=6.0, can_hover=True, stall=0.0),
+                   wind=0.0, wind_from=math.radians(225), fw='ArduCopter V4.8.0-dev',
+                   fw_ver=(4, 8, 0),
+                   # A copter can stop and hover, turns on the spot and climbs briskly. Its climb
+                   # and sink are rates rather than pitch angles (ArduCopter PILOT_SPEED_UP 250 cm/s
+                   # and PILOT_SPEED_DN, RTL_ALT 1500 cm), and it brakes into a waypoint instead of
+                   # overflying it, so no miss angle applies.
+                   bank_max=math.radians(35), yaw_rate=math.radians(90), climb=2.5, sink=1.5,
+                   accel=3.0, wp_radius=6.0, can_hover=True, stall=0.0,
+                   speed_max=10.0, rtl_alt=15.0, miss_angle=None,
+                   pitch_up=math.radians(15), pitch_dn=math.radians(15)),
     'plane': dict(mav_type='MAV_TYPE_FIXED_WING', modes=PLANE_MODES,
                   auto_mode=10, loiter_mode=12, rtl_mode=11, land_mode=None, guided_mode=15,
-                  radius=300.0, speed=22.0, alt=80.0, cells=4, nominal_v=16.8, throttle=62,
-                  wind=2.5, fw='ArduPlane V4.5.7', fw_ver=(4, 5, 7),
+                  radius=60.0, speed=12.0, alt=80.0, cells=4, nominal_v=16.8, throttle=62,
+                  wind=2.5, wind_from=math.radians(225), fw='ArduPlane V4.8.0-dev',
+                  fw_ver=(4, 8, 0),
                   # A plane cannot hover: below stall it stops being a simulation worth trusting,
-                  # so speed is floored and every "hold position" becomes an orbit.
-                  bank_max=math.radians(45), yaw_rate=math.radians(25), climb=3.0, sink=3.0,
-                  accel=2.0, wp_radius=90.0, can_hover=False, stall=12.0),
+                  # so speed is floored and every "hold position" becomes an orbit. The limits are
+                  # ArduPlane's shipped defaults (ArduPlane/config.h): ROLL_LIMIT_DEG 45,
+                  # PITCH_MAX 20, PITCH_MIN -25, AIRSPEED_CRUISE 12, AIRSPEED_FBW_MIN 9,
+                  # AIRSPEED_FBW_MAX 22, LOITER_RADIUS_DEFAULT 60, WP_RADIUS_DEFAULT 90,
+                  # ALT_HOLD_HOME (RTL_ALTITUDE) 100.
+                  bank_max=math.radians(45), yaw_rate=math.radians(25),
+                  pitch_up=math.radians(20), pitch_dn=math.radians(25),
+                  accel=2.0, wp_radius=90.0, can_hover=False, stall=9.0,
+                  speed_max=22.0, rtl_alt=100.0, miss_angle=math.radians(90)),
 }
+
+# Where INAV's fixed-wing defaults differ from ArduPlane's, applied on top of the plane profile for
+# `--firmware inav` so each firmware flies to its own numbers. From src/main/fc/settings.yaml:
+# nav_fw_bank_angle 35, nav_fw_climb_angle 20, nav_fw_dive_angle 15, nav_fw_loiter_radius 7500 cm,
+# nav_wp_radius 100 cm, nav_rth_altitude 1000 cm, nav_min_ground_speed 7.
+#
+# The 1 m waypoint radius is not a typo and not unflyable: INAV also sequences a waypoint once the
+# bearing to it swings more than 100 degrees off the original (`isWaypointReached`, navigation.c),
+# which is what actually ends a leg for a fixed wing. ArduPlane does the same thing geometrically,
+# by testing whether the aircraft has crossed the finish line through the waypoint
+# (`past_interval_finish_line`, verify_nav_wp), so both need the overshoot rule and not just a
+# radius.
+INAV_FW_DEFAULTS = dict(
+    bank_max=math.radians(35), pitch_up=math.radians(20), pitch_dn=math.radians(15),
+    radius=75.0, wp_radius=1.0, rtl_alt=10.0, stall=7.0,
+    miss_angle=math.radians(100),
+)
 
 # Default orbit centre: a real open test area, so the map has something sensible underneath it.
 HOME_LAT = 61.48647335002389
@@ -438,6 +478,12 @@ class Vehicle:
         self.rc_t = 0.0           # last override arrival, for the failsafe/level-out below
         self.guided = None        # (lat, lon, alt) target while in GUIDED
         self.guided_yaw = None    # CONDITION_YAW / GUIDED_CHANGE_HEADING hold
+        self.leg_seq = None       # mission leg whose bearing is captured in `leg_brg`
+        self.leg_brg = 0.0
+        # Sequence of the waypoint just reached, consumed by the protocol loop for
+        # MISSION_ITEM_REACHED. Initialised here rather than only in update() so the model can be
+        # driven step by step (offline checks) without hitting an undefined attribute.
+        self.reached = None
         self.loiter = None        # (lat, lon, alt) centre while loitering
         self.takeoff_alt = None
         self.paused = False
@@ -556,13 +602,28 @@ class Vehicle:
             self.roll = clamp(math.atan(rate * max(self.speed, 1.0) / G),
                               -self.p['bank_max'], self.p['bank_max'])
 
+    def climb_limits(self):
+        """Climb and sink rates the airframe can hold, in m/s.
+
+        A copter's limits are rates in their own right. A plane's are angles: both firmwares cap the
+        climb and the descent by pitch (ArduPlane PTCH_LIM_MAX_DEG / PTCH_LIM_MIN_DEG, INAV
+        nav_fw_climb_angle / nav_fw_dive_angle), so the rate has to follow from the airspeed. That
+        is why a slow plane climbs slowly and the same aircraft climbs faster with the throttle up,
+        instead of every plane climbing at one hardcoded figure.
+        """
+        if self.p['can_hover']:
+            return self.p['climb'], self.p['sink']
+        v = max(self.speed, self.p['stall'])
+        return v * math.sin(self.p['pitch_up']), v * math.sin(self.p['pitch_dn'])
+
     def _hold_alt(self, dt, target_alt):
         err = target_alt - self.rel_alt
-        want = clamp(err, -self.p['sink'], self.p['climb'])
+        climb, sink = self.climb_limits()
+        want = clamp(err, -sink, climb)
         self.vz = -want                                  # MAVLink vz is positive DOWN
         self.rel_alt = max(0.0, self.rel_alt + want * dt)
-        self.pitch = clamp(math.asin(clamp(want / max(self.speed, 1.0), -0.5, 0.5)),
-                           math.radians(-25), math.radians(25))
+        self.pitch = clamp(math.asin(clamp(want / max(self.speed, 1.0), -0.9, 0.9)),
+                           -self.p['pitch_dn'], self.p['pitch_up'])
 
     def _hold_speed(self, dt, target):
         target = max(target, self.p['stall'] if not self.on_ground else 0.0)
@@ -570,22 +631,54 @@ class Vehicle:
         self.speed += clamp(target - self.speed, -step, step)
         self.speed = max(0.0, self.speed)
 
-    def _advance(self, dt):
-        north = math.cos(self.yaw) * self.speed * dt
-        east = math.sin(self.yaw) * self.speed * dt
-        self.lat, self.lon = offset_m(self.lat, self.lon, north, east)
+    def ground_vector(self):
+        """North/east ground velocity: the air vector plus the wind vector, in m/s.
 
-    def _goto(self, dt, lat, lon, alt, arrive):
-        """Fly toward a point; True once inside the acceptance radius."""
+        `wind` is the speed the air moves and `wind_from` the direction it comes FROM, which is the
+        convention MAVLink's WIND message uses. A wind from 225 degrees pushes the aircraft toward
+        45 degrees, hence the reversal here.
+        """
+        vn = math.cos(self.yaw) * self.speed
+        ve = math.sin(self.yaw) * self.speed
+        if self.speed <= 0.5 or self.on_ground:
+            return vn, ve                       # parked or rolling: no drift to add
+        wind = self.p['wind']
+        toward = self.p['wind_from'] + math.pi
+        return vn + math.cos(toward) * wind, ve + math.sin(toward) * wind
+
+    def _advance(self, dt):
+        vn, ve = self.ground_vector()
+        self.lat, self.lon = offset_m(self.lat, self.lon, vn * dt, ve * dt)
+
+    def _goto(self, dt, lat, lon, alt, arrive, leg_bearing=None):
+        """Fly toward a point; True once the leg is complete.
+
+        A leg ends on distance *or* on overshoot, which is how both firmwares really do it: a plane
+        that misses the acceptance radius must still move on rather than circle the waypoint for
+        ever. ArduPlane tests whether the aircraft has crossed the finish line through the waypoint
+        (`past_interval_finish_line`) and INAV whether the bearing has swung past its limit off the
+        original leg bearing (`isWaypointReached`); both reduce to "the waypoint is now behind us",
+        which is what `leg_bearing` plus the miss angle expresses here. Without it, INAV's 1 m
+        default acceptance radius would never be met by a fixed wing.
+        """
         d = dist_m(self.lat, self.lon, lat, lon)
-        self._turn_to(dt, bearing_to(self.lat, self.lon, lat, lon))
+        brg = bearing_to(self.lat, self.lon, lat, lon)
+        self._turn_to(dt, brg)
         self._hold_alt(dt, alt)
         # A hovering airframe brakes into the point, otherwise it sails past at cruise speed and
-        # circles the target for ever. A plane cannot slow below stall, so it just flies through
-        # and the acceptance radius (WP_RADIUS) is what closes the leg.
+        # circles the target for ever. A plane cannot slow below stall, so it flies through.
         want = min(self.cruise_speed, max(1.0, d * 0.6)) if self.p['can_hover'] else self.cruise_speed
         self._hold_speed(dt, want)
-        return d <= arrive
+        if d <= arrive:
+            return True
+        miss = self.p['miss_angle']
+        if miss is not None and leg_bearing is not None:
+            # Only past a point where overshooting is even possible: within one turn diameter the
+            # bearing swings wildly while the aircraft is still legitimately closing in.
+            turn_d = max(self.radius, 2.0 * arrive)
+            if d < turn_d and abs(wrap_pi(brg - leg_bearing)) > miss:
+                return True
+        return False
 
     def _orbit(self, dt, lat, lon, alt):
         """Hold a point: a copter hovers on it, a plane circles it at `radius`."""
@@ -627,7 +720,7 @@ class Vehicle:
             self._hold_speed(dt, abs(pitch_cmd) * self.cruise_speed)
             self.roll = roll_cmd
             self.pitch = math.radians(-12) * abs(pitch_cmd)
-            climb = ((thr - 0.5) * 2.0 * self.p['climb']) if thr is not None else 0.0
+            climb = ((thr - 0.5) * 2.0 * self.climb_limits()[0]) if thr is not None else 0.0
             self._hold_alt(dt, self.rel_alt + climb * dt * 4)
         else:
             # Plane: roll turns, elevator climbs, throttle sets speed.
@@ -636,7 +729,7 @@ class Vehicle:
             self.roll = roll_cmd
             target_speed = self.cruise_speed * (0.5 + thr) if thr is not None else self.cruise_speed
             self._hold_speed(dt, target_speed)
-            self._hold_alt(dt, self.rel_alt + pitch_cmd * self.p['climb'] * dt * 4)
+            self._hold_alt(dt, self.rel_alt + pitch_cmd * self.climb_limits()[0] * dt * 4)
 
     def _fly_mission(self, dt):
         """Execute stored items in sequence. Slot 0 is home and is never navigated to."""
@@ -658,7 +751,13 @@ class Vehicle:
         C = self.CMDS
 
         if cmd == C['MAV_CMD_NAV_WAYPOINT']:
-            if self._goto(dt, lat, lon, alt, self.p['wp_radius']):
+            if self._goto(dt, lat, lon, alt, self.p['wp_radius'],
+                          self._leg_bearing(m.current, lat, lon)):
+                d = dist_m(self.lat, self.lon, lat, lon)
+                # ArduPlane announces both outcomes by name (verify_nav_wp), and the distance in the
+                # text is how a pilot tells a clean capture from an overshoot.
+                verb = 'Reached' if d <= self.p['wp_radius'] else 'Passed'
+                self.notify(f'{verb} waypoint #{m.current} dist {int(d)}m')
                 self._reach(m.current)
         elif cmd in (C['MAV_CMD_NAV_LOITER_UNLIM'], C['MAV_CMD_NAV_LOITER_TURNS'],
                      C['MAV_CMD_NAV_LOITER_TIME']):
@@ -704,6 +803,19 @@ class Vehicle:
     def _reach(self, seq):
         self.reached = seq            # picked up by the main loop for MISSION_ITEM_REACHED
         self.mission.current = seq + 1
+        self.leg_seq = None           # the next leg captures its own bearing on first pass
+
+    def _leg_bearing(self, seq, lat, lon):
+        """Bearing to the waypoint as the leg began, captured once per leg.
+
+        Both firmwares compare against the bearing at the *start* of the leg rather than a live one:
+        ArduPlane stores prev_WP_loc and INAV `posControl.activeWaypoint.bearing`. Recomputing it
+        every tick would make the comparison meaningless, since the difference would always be 0.
+        """
+        if self.leg_seq != seq:
+            self.leg_seq = seq
+            self.leg_brg = bearing_to(self.lat, self.lon, lat, lon)
+        return self.leg_brg
 
     def _land(self, dt, lat, lon):
         self._goto(dt, lat, lon, 0.0, max(self.p['wp_radius'], 15.0))
@@ -726,8 +838,9 @@ class Vehicle:
             # arrives, then stay put. Snapping rel_alt to 0 would make the altitude trace lie.
             self.roll = self.pitch = 0.0
             if self.rel_alt > 0.0:
-                self.rel_alt = max(0.0, self.rel_alt - self.p['sink'] * dt)
-                self.vz = self.p['sink']
+                sink = self.climb_limits()[1]
+                self.rel_alt = max(0.0, self.rel_alt - sink * dt)
+                self.vz = sink
                 self._hold_speed(dt, 0.0)
             else:
                 self.on_ground = True
@@ -749,8 +862,11 @@ class Vehicle:
         elif self.mode == 'land':
             self._land(dt, self.lat, self.lon)
         elif self.mode == 'rtl':
-            if self._goto(dt, self.home_lat, self.home_lon, self.cruise_alt, self.p['wp_radius']):
-                self._orbit(dt, self.home_lat, self.home_lon, self.cruise_alt)
+            # RTL climbs to the firmware's return altitude (ArduPlane RTL_ALTITUDE / INAV
+            # nav_rth_altitude), which is not the cruise altitude the vehicle happened to be at.
+            rtl_alt = self.p['rtl_alt']
+            if self._goto(dt, self.home_lat, self.home_lon, rtl_alt, self.p['wp_radius']):
+                self._orbit(dt, self.home_lat, self.home_lon, rtl_alt)
         elif self.mode == 'guided':
             tgt = self.guided or (self.lat, self.lon, self.rel_alt)
             if self._goto(dt, tgt[0], tgt[1], tgt[2], self.p['wp_radius']):
@@ -778,11 +894,15 @@ class Vehicle:
             (G * math.tan(self.roll) / max(self.speed, 1.0) if not self.p['can_hover']
              else self.roll / math.radians(12) * self.p['yaw_rate'])
         self.alt = self.home_alt + self.rel_alt
-        self.vn = math.cos(self.yaw) * self.speed
-        self.ve = math.sin(self.yaw) * self.speed
-        self.groundspeed = self.speed
-        # Planes fly an airspeed offset from ground speed; a copter's airspeed sensor tracks it.
-        self.airspeed = self.groundspeed + (self.p['wind'] if self.speed > 0.5 else 0.0)
+        # Ground track is the air vector plus the wind vector, so `speed` is the airspeed the model
+        # controls and ground speed falls out of the geometry: upwind legs are slow over the ground
+        # and downwind legs fast, and a loiter circle cycles between the two. Treating wind as a
+        # constant added to ground speed instead would report an airspeed that no heading justifies
+        # and would leave the aircraft tracking as if the air were still.
+        vn, ve = self.ground_vector()
+        self.vn, self.ve = vn, ve
+        self.groundspeed = math.hypot(vn, ve)
+        self.airspeed = self.speed
         # ~1 V of sag across a 12 min flight, so the battery widget visibly moves.
         self.voltage = max(self.p['nominal_v'] * 0.76, self.p['nominal_v'] - t / 720.0)
         return t
@@ -794,6 +914,19 @@ class Vehicle:
 # returns something realistic to page through, and so a PARAM_SET round-trip can be tested against
 # values that plausibly affect flight. Q_ENABLE stays 0: this sim is not a VTOL and refuses
 # MAV_CMD_DO_VTOL_TRANSITION accordingly.
+def profile_for(args):
+    """The airframe profile, with INAV's fixed-wing defaults applied when that is the firmware.
+
+    Both stacks fly the same model; what differs is the numbers they ship with, so the firmware
+    selects the limits rather than every caller remembering to override them.
+    """
+    profile = dict(PROFILES[args.vehicle])
+    if args.firmware == 'inav' and not profile['can_hover']:
+        profile.update(INAV_FW_DEFAULTS)
+        profile['fw'] = f'INAV {args.version}'
+    return profile
+
+
 def default_params(profile, v=None):
     p = {
         'AHRS_EKF_TYPE': 3.0, 'Q_ENABLE': 0.0,
@@ -804,7 +937,7 @@ def default_params(profile, v=None):
         'BATT_CRT_VOLT': round(profile['nominal_v'] * 0.80, 2),
         'BATT_ARM_VOLT': round(profile['nominal_v'] * 0.90, 2),
         'FENCE_ENABLE': 0.0, 'FENCE_ACTION': 1.0, 'FENCE_ALT_MAX': 120.0, 'FENCE_RADIUS': 300.0,
-        'RTL_ALTITUDE': 100.0, 'GPS_TYPE': 1.0, 'COMPASS_USE': 1.0,
+        'RTL_ALTITUDE': profile['rtl_alt'], 'GPS_TYPE': 1.0, 'COMPASS_USE': 1.0,
         'SERIAL1_BAUD': 57.0, 'SERIAL1_PROTOCOL': 2.0,
         'SR1_POSITION': 5.0, 'SR1_EXTRA1': 10.0, 'SR1_EXTRA2': 5.0, 'SR1_EXT_STAT': 2.0,
         'RC1_MIN': 1000.0, 'RC1_MAX': 2000.0, 'RC1_TRIM': 1500.0,
@@ -820,13 +953,20 @@ def default_params(profile, v=None):
         p.update({'WPNAV_SPEED': speed * 100, 'WPNAV_RADIUS': profile['wp_radius'] * 100,
                   'PILOT_SPEED_UP': profile['climb'] * 100, 'LAND_SPEED': 50.0})
     else:
-        p.update({'AIRSPEED_CRUISE': speed, 'AIRSPEED_MIN': 9.0,
+        # Climb and sink are reported from the same pitch limits the model flies to, at the
+        # airspeed it is flying, rather than as independent constants that could disagree with it.
+        climb, sink = (v.climb_limits() if v else
+                       (speed * math.sin(profile['pitch_up']), speed * math.sin(profile['pitch_dn'])))
+        p.update({'AIRSPEED_CRUISE': speed, 'AIRSPEED_MIN': profile['stall'],
+                  'AIRSPEED_MAX': profile['speed_max'],
                   'WP_RADIUS': profile['wp_radius'], 'WP_LOITER_RAD': radius,
                   'TRIM_THROTTLE': float(profile['throttle']),
-                  # LIM_ROLL_CD is the 4.5 name and matches the model's 45 degree bank limit.
-                  # ArduPlane 4.6 renamed it ROLL_LIMIT_DEG (degrees), so a newer --fw would want that.
-                  'LIM_ROLL_CD': 4500.0,
-                  'TECS_CLMB_MAX': profile['climb'], 'TECS_SINK_MAX': profile['sink']})
+                  # ROLL_LIMIT_DEG in degrees. The old centidegree LIM_ROLL_CD is gone from
+                  # ArduPlane master, so serving it would be inventing a parameter.
+                  'ROLL_LIMIT_DEG': round(math.degrees(profile['bank_max']), 1),
+                  'PTCH_LIM_MAX_DEG': round(math.degrees(profile['pitch_up']), 1),
+                  'PTCH_LIM_MIN_DEG': -round(math.degrees(profile['pitch_dn']), 1),
+                  'TECS_CLMB_MAX': round(climb, 1), 'TECS_SINK_MAX': round(sink, 1)})
     return p
 
 
@@ -878,7 +1018,7 @@ def run_mavlink(args):
     link = Link(d, sock)
     if inav:
         link.allow = INAV_MAVLINK_TX
-    profile = PROFILES[args.vehicle]
+    profile = profile_for(args)
     mission = Mission()
     v = Vehicle(args, profile, mission)
     params = default_params(profile, v)
@@ -1122,7 +1262,11 @@ def run_mavlink(args):
             num = int(p(2))                     # ArduPilot puts the custom mode in param2
             name = profile['modes'].get(num)
             if name is None or not v.set_mode(name):
-                say(f'Kite SIM: mode {num} not simulated', 'warning')
+                # Name the mode when it is one the firmware really has: "AUTOLAND not simulated"
+                # says the sim is the limit, while a bare number leaves it ambiguous whether the
+                # mode exists at all. Both answers are DENIED either way.
+                known = (PLANE_MODES_UNSIMULATED.get(num) if not profile['can_hover'] else None)
+                say(f'Kite SIM: mode {known.upper() if known else num} not simulated', 'warning')
                 return DENIED
             return ACCEPTED
         if cmd == CMD['MAV_CMD_NAV_TAKEOFF']:
@@ -1525,8 +1669,10 @@ def run_mavlink(args):
             elif name == 'MISSION_CURRENT':
                 link.send('MISSION_CURRENT', seq=mission.current)
             elif name == 'WIND':
-                # A steady breeze, so the wind widget has something to point at.
-                link.send('WIND', direction=225.0, speed=profile['wind'], speed_z=0.2)
+                # WIND.direction is where the wind blows FROM, the same convention the model
+                # drifts by, so the widget and the ground track cannot disagree.
+                link.send('WIND', direction=math.degrees(profile['wind_from']),
+                          speed=profile['wind'], speed_z=0.2)
             elif name == 'POSITION_TARGET_GLOBAL_INT':
                 tgt = v.guided if v.mode == 'guided' and v.guided else None
                 if tgt is None and v.mode == 'auto':
@@ -1873,7 +2019,7 @@ class InavVehicle:
     ARM_CH, MODE_CH = INAV_ARM_CH, INAV_MODE_CH
 
     def __init__(self, args):
-        profile = PROFILES[args.vehicle]
+        profile = profile_for(args)
         self.mission = Mission()
         self.v = Vehicle(args, profile, self.mission)
         self.v.CMDS = MAV_CMDS
@@ -2121,8 +2267,10 @@ def run_msp(args):
                                9999 if iv.no_fix else 110, 0 if iv.no_fix else 150,
                                0 if iv.no_fix else 220, 6)
         if code == MSP2_INAV_WIND:
-            # speed cm/s, bearing the air moves TOWARD, flags bit0 = estimate valid
-            return struct.pack('<HHB', int(iv.profile['wind'] * 100), 45, 0x01)
+            # speed cm/s, bearing the air moves TOWARD, flags bit0 = estimate valid. INAV reports
+            # the direction the air moves toward, the opposite of MAVLink's WIND.
+            toward = int(math.degrees(iv.profile['wind_from']) + 180) % 360
+            return struct.pack('<HHB', int(iv.profile['wind'] * 100), toward, 0x01)
         if code == MSP2_INAV_MISC2:
             up = int(time.time() - iv.t_start)
             flight = int(time.time() - iv.flight_start) if iv.flight_start else 0
@@ -2238,7 +2386,7 @@ def main():
     ap.add_argument('--defs', help='mavlink only: path to ardupilotmega.xml '
                                    '(default: the vendored mavlink crate)')
     ap.add_argument('--version', default='9.1.0',
-                    help='inav only: version to report (default 9.1.0; MAVLink commands need 9.0+)')
+                    help='inav only: version to report (default 9.1.0, INAV master)')
     args = ap.parse_args()
 
     inav = args.firmware == 'inav'
