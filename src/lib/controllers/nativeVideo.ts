@@ -295,8 +295,10 @@ function coverBox(el: HTMLElement, rect: DOMRect): DOMRect {
   return new DOMRect(rect.x + (rect.width - w) / 2, rect.y + (rect.height - h) / 2, w, h);
 }
 
-/** One hole to cut: where it is (viewport px, device-pixel-snapped) and how its corners round. */
+/** One hole to cut: whose surface it is, where it is (viewport px, device-pixel-snapped) and how
+ *  its corners round. */
 interface Hole {
+  id: NativeSurfaceId;
   rect: DOMRect;
   radii: HoleRadii;
 }
@@ -363,6 +365,7 @@ function tick(): void {
     const cutRight = s.vis.right < s.rect.right - 0.5;
     const cutBottom = s.vis.bottom < s.rect.bottom - 0.5;
     holes.push({
+      id: s.id,
       rect: snapped,
       radii: {
         tl: cutTop || cutLeft ? 0 : radius,
@@ -397,6 +400,10 @@ function tick(): void {
 }
 
 
+/** How far the clip's outer ring reaches beyond the element's own box (layout px) — enough for the
+ *  bezel shadows the video surfaces paint outside theirs. */
+const OUTER_MARGIN_PX = 24;
+
 /** Two holes that OVERLAP would cancel each other out: the outer ring winds one way, each hole the
  *  other, so a point inside both counts +1 −1 −1 and the nonzero fill rule paints it again — the map
  *  reappeared exactly where a floating window covered the widget tile (Marc, 2026-09-08). Nothing
@@ -426,7 +433,7 @@ function subtractHole(a: Hole, b: DOMRect): Hole[] {
   const out: Hole[] = [];
   const band = (x1: number, y1: number, x2: number, y2: number) => {
     if (x2 - x1 < 0.5 || y2 - y1 < 0.5) return; // sub-pixel slivers cut nothing
-    out.push({ rect: new DOMRect(x1, y1, x2 - x1, y2 - y1), radii: keptCorners(a, x1, y1, x2, y2) });
+    out.push({ id: a.id, rect: new DOMRect(x1, y1, x2 - x1, y2 - y1), radii: keptCorners(a, x1, y1, x2, y2) });
   };
   const midTop = Math.max(r.top, iy1);
   const midBottom = Math.min(r.bottom, iy2);
@@ -478,8 +485,11 @@ function holePath(el: HTMLElement, holes: Hole[]): string | null {
   const sy = b.height / h;
   const f = (v: number) => v.toFixed(2);
   // Outer ring clockwise, every hole counter-clockwise inside it — the nonzero fill rule then
-  // leaves each of them unpainted, so two surfaces cut two holes out of the same layer.
-  let d = `M0 0H${f(w)}V${f(h)}H0Z`;
+  // leaves each of them unpainted, so two surfaces cut two holes out of the same layer. The ring
+  // reaches PAST the element's box: a clip path cuts an element's box-shadow as well, and the
+  // surfaces paint their opaque bezel as one (that is what the frames are made of).
+  const m = OUTER_MARGIN_PX;
+  let d = `M${f(-m)} ${f(-m)}H${f(w + m)}V${f(h + m)}H${f(-m)}Z`;
   let cut = false;
   for (const { rect: hole, radii } of holes) {
     const ring = holeRing(hole, radii, b, sx, sy);
@@ -528,6 +538,20 @@ function holeRing(hole: DOMRect, radii: HoleRadii, b: DOMRect, sx: number, sy: n
   );
 }
 
+/** Which holes cut into `el`: all of them for a plain layer (the map, the page ground), and for an
+ *  element that BELONGS to a surface (`data-nv-clip="floating"`) only the holes of surfaces painted
+ *  ABOVE it. That is the video frames' case: the floating window's bezel used to shine through the
+ *  widget tile's hole, because the tile is transparent there and the bezel sits behind it. DOM
+ *  stacking is the reverse of the surface priority (the widget dock paints over the floating window,
+ *  which paints over the fullscreen swap), so "above me" is "later in PRIORITY". A surface must
+ *  never be cut by its OWN hole — its overlays and its bezel live exactly there. */
+function holesFor(el: HTMLElement, holes: Hole[]): Hole[] {
+  const own = el.dataset.nvClip as NativeSurfaceId | undefined;
+  const rank = own ? PRIORITY.indexOf(own) : -1;
+  if (rank < 0) return holes;
+  return holes.filter((h) => PRIORITY.indexOf(h.id) > rank);
+}
+
 function applyClips(holes: Hole[]): void {
   if (holes.length === 0) {
     clearClips();
@@ -537,7 +561,8 @@ function applyClips(holes: Hole[]): void {
   for (const el of document.querySelectorAll<HTMLElement>('[data-nv-clip]')) targets.add(el);
   targets.add(ensureGround());
   for (const el of targets) {
-    const path = holePath(el, holes);
+    const mine = holesFor(el, holes);
+    const path = mine.length > 0 ? holePath(el, mine) : null;
     if (path) {
       if (clipped.get(el) !== path) {
         el.style.clipPath = path;

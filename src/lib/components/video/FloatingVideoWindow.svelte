@@ -228,12 +228,17 @@
     <div class="fw-frame" class:nv-active={$activeNativeSurfaces.has('floating')}></div>
 
     <!-- content: the video. When the map is in this frame, it's rendered (top-level) by +page here
-         instead, and the body is omitted. Double-click the video → the map jumps into this frame. -->
+         instead, and the body is omitted. Double-click the video → the map jumps into this frame.
+         `data-nv-clip="floating"` while it holds the hardware layer: the opaque bezel this box
+         paints (its border + the ring around it) sits BEHIND the widget tile, whose own hole is
+         transparent — so the bezel showed through the tile's picture wherever the two overlap. The
+         router cuts it away with the holes of the surfaces above this one, never with its own. -->
     {#if !mapHere}
       <!-- svelte-ignore a11y_no_static_element_interactions -->
       <div
         class="fw-body"
         class:nv-active={$activeNativeSurfaces.has('floating')}
+        data-nv-clip={$activeNativeSurfaces.has('floating') ? 'floating' : undefined}
         onpointerdown={onBodyPointerDown}
         ondblclick={mouseDoubleClick(() => setMapLocation('floating'))}
         use:doubleTap={() => setMapLocation('floating')}
