@@ -225,7 +225,13 @@
     style="left:{left}px; top:{top}px; width:{width}px; height:{height}px;"
   >
     <!-- glass bezel (behind) — the video / map sits in its inner box -->
-    <div class="fw-frame" class:nv-active={$activeNativeSurfaces.has('floating')}></div>
+    <!-- The bezel keeps its border and its drop shadow while the hardware layer is armed, so it is
+         a clip target too — that outline was what still crossed the widget's picture. -->
+    <div
+      class="fw-frame"
+      class:nv-active={$activeNativeSurfaces.has('floating')}
+      data-nv-clip={$activeNativeSurfaces.has('floating') ? 'floating' : undefined}
+    ></div>
 
     <!-- content: the video. When the map is in this frame, it's rendered (top-level) by +page here
          instead, and the body is omitted. Double-click the video → the map jumps into this frame.
