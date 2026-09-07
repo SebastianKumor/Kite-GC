@@ -2015,34 +2015,10 @@ export function setWidgetRect(rect: { x: number; y: number; w: number; h: number
   patch({ widgetRect: rect });
 }
 
-// ── Native Picture-in-Picture ────────────────────────────────────────
-// PiP is bound to its source <video> element, so the source must be a
-// persistently-mounted element (not the panel preview, which unmounts when the
-// panel closes — that would kill the PiP). The app root registers a hidden video
-// element here; `enterPiP()` pops it out into a free-floating OS window that
-// survives closing the panel.
-export const pipSupported = typeof document !== 'undefined' && !!document.pictureInPictureEnabled;
-
-let pipEl: HTMLVideoElement | null = null;
-export function registerPiPElement(el: HTMLVideoElement | null): void {
-  pipEl = el;
-}
-
-export async function enterPiP(): Promise<void> {
-  const el = pipEl as (HTMLVideoElement & { requestPictureInPicture?: () => Promise<unknown> }) | null;
-  try {
-    if (
-      el?.requestPictureInPicture &&
-      typeof document !== 'undefined' &&
-      document.pictureInPictureEnabled &&
-      document.pictureInPictureElement !== el
-    ) {
-      await el.requestPictureInPicture();
-    }
-  } catch (e) {
-    console.warn('[video] Picture-in-Picture failed', e);
-  }
-}
+// Detaching the video into its own window is a feature of the NATIVE decode route and lives in
+// its own window (VIDEO_MULTISINK_WINDOW.md D2/PR B). The browser's Picture-in-Picture that used to
+// sit here was bound to a <video> element in the WebView: the native route never puts a frame
+// there, so it opened an empty window, and it only ever worked on Windows. Removed with the hub.
 
 /** Delay before auto-starting the Linux `camera` source, so the UI paints first (see `initVideo`). */
 const LINUX_CAMERA_AUTOSTART_DELAY_MS = 1200;

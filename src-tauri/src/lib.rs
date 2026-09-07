@@ -94,7 +94,7 @@ use commands::video::{
     video_list_native_devices, video_probe_device,
     video_native_mjpeg_start, video_native_mjpeg_stop, video_rtsp_mjpeg_start,
     video_rtsp_native_start, video_rtsp_native_stop,
-    video_rtsp_native_sink_rect, video_rtsp_native_sink_visible, video_rtsp_native_stats,
+    video_rtsp_native_sink_surfaces, video_rtsp_native_stats,
     video_linux_hole_spike,
     video_rtsp_native_sink_buffer, video_rtsp_native_sink_orient,
 };
@@ -766,8 +766,7 @@ pub fn run() {
             video_rtsp_mjpeg_start,
             video_rtsp_native_start,
             video_rtsp_native_stop,
-            video_rtsp_native_sink_rect,
-            video_rtsp_native_sink_visible,
+            video_rtsp_native_sink_surfaces,
             video_linux_hole_spike,
             video_rtsp_native_stats,
             video_rtsp_native_sink_buffer,

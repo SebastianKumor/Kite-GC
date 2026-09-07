@@ -6,7 +6,7 @@
 <script lang="ts">
   // Video control panel on the panel framework (docs/active/PANEL_FRAMEWORK.md): a `compact`
   // PanelShell. Header = Start/Stop; content = status/info lines + source/resolution/mirror
-  // settings; footer = Video Window/detach (button). No preview surface: the picture lives in the
+  // settings; no footer. No preview surface either: the picture lives in the
   // floating window (docked window on the phone) / the widget / the map swap — a started source
   // appears there, and the window's own toggle parks it (PHONE_VIDEO.md D1 + §10).
   // Kept deliberately simple but extensible (more sources can slot into the content field).
@@ -38,8 +38,6 @@
     selectRtspConnection,
     isWebrtcAvailable,
     type RtspTransport,
-    enterPiP,
-    pipSupported,
     type VideoResolution,
     type VideoKind,
     type CameraFps,
@@ -694,26 +692,8 @@
   </div>
 {/snippet}
 
-{#snippet footer()}
-  <div class="vp-footer">
-    <!-- The floating / docked window is shown and parked by its own toggle button next to the
-         frame (PHONE_VIDEO.md D3, desktop §10) — nothing for it here. -->
-    <!-- Detached PiP window: a one-way action (can't be closed from inside the app) → plain button.
-         PiP is bound to a <video>/MediaStream, so it can't carry an MJPEG (<img>) feed → disabled then. -->
-    {#if pipSupported}
-      <Button
-        variant="standard"
-        disabled={$videoState.status !== 'live' || !!$videoState.mjpegUrl}
-        onclick={enterPiP}
-      >
-        {$t('video.videoWindow')}
-      </Button>
-    {/if}
-  </div>
-{/snippet}
-
 <div class="vpv2">
-  <PanelShell variant="compact" title={$t('video.title')} {headerActions} {body} {footer} />
+  <PanelShell variant="compact" title={$t('video.title')} {headerActions} {body} />
 </div>
 
 <style>
@@ -930,5 +910,4 @@
   .dl-fill { height: 100%; background: #37a8db; transition: width 0.2s ease; }
   .dl-pct { font-size: 11px; color: #9ad0e8; font-variant-numeric: tabular-nums; min-width: 30px; text-align: right; }
 
-  .vp-footer { display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%; }
 </style>

@@ -691,7 +691,6 @@
     "unobstructed": "无遮挡全屏",
     "unobstructedHint": "全屏（与地图互换）时视频会缩小，使已放置小部件的面板和导航栏不会遮挡画面。空面板会释放其边缘。",
     "codec": "编解码器",
-    "videoWindow": "视频窗口（分离）",
     "snapCorner": "吸附到角落",
     "pip": "画中画",
     "close": "关闭",

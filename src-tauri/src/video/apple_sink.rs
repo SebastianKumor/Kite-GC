@@ -48,6 +48,7 @@ use objc2_core_media::{
 
 use super::apple_host as host;
 use super::rtsp::VideoCodec;
+use super::surface::SinkSurface;
 
 /// How long the initial layer attach may take (one main-thread hop away) before the sink
 /// declares failure.
@@ -126,15 +127,28 @@ impl AppleVideoSink {
         self.shared.error.lock().unwrap().clone()
     }
 
+    /// The surfaces to present into (VIDEO_MULTISINK_WINDOW.md §4.1). This platform drives ONE
+    /// output for now, so the first entry wins — the router publishes them highest-priority first —
+    /// and an empty list hides the layer. Two outputs here are the follow-up (§4.2).
+    pub fn set_surfaces(&self, surfaces: &[SinkSurface]) {
+        match surfaces.first() {
+            Some(s) => {
+                self.set_rect(s.full.0, s.full.1, s.full.2, s.full.3, s.clip.0, s.clip.1, s.clip.2, s.clip.3);
+                self.set_visible(true);
+            }
+            None => self.set_visible(false),
+        }
+    }
+
     /// On-screen video rect (PHYSICAL px, window coords): the FULL box `x/y/w/h` for the
     /// aspect-fit layout plus the VISIBLE part `cx/cy/cw/ch` — the host clips the video at that
     /// edge (scrolled panels), it never shrinks into the remainder.
     #[allow(clippy::too_many_arguments)]
-    pub fn set_rect(&self, x: i32, y: i32, w: i32, h: i32, cx: i32, cy: i32, cw: i32, ch: i32) {
+    fn set_rect(&self, x: i32, y: i32, w: i32, h: i32, cx: i32, cy: i32, cw: i32, ch: i32) {
         host::set_rect(x, y, w, h, cx, cy, cw, ch);
     }
 
-    pub fn set_visible(&self, visible: bool) {
+    fn set_visible(&self, visible: bool) {
         self.shared.hidden.store(!visible, Ordering::Relaxed);
         host::set_visible(visible);
     }

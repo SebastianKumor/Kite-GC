@@ -694,7 +694,6 @@
     "unobstructed": "Unverdecktes Vollbild",
     "unobstructedHint": "Im Vollbild (Kartentausch) wird das Video verkleinert, damit belegte Widget-Leisten und die Navigationsleiste das Bild nicht überdecken. Leere Leisten geben ihre Kante frei.",
     "codec": "Codec",
-    "videoWindow": "Video-Fenster (ablösen)",
     "snapCorner": "An Ecke andocken",
     "pip": "Bild-im-Bild",
     "close": "Schließen",

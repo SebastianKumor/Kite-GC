@@ -51,6 +51,7 @@ use gst::prelude::*;
 
 use super::linux_host;
 use super::rtsp::{strip_window, SpsProbe, VideoCodec, Window};
+use super::surface::SinkSurface;
 
 /// The host places the widget one main-thread hop away; the GL sink needs it there before
 /// it starts (its GL context comes from the realized GtkGLArea).
@@ -401,10 +402,23 @@ impl LinuxVideoSink {
         self.shared.error.lock().unwrap().clone()
     }
 
+    /// The surfaces to present into (VIDEO_MULTISINK_WINDOW.md §4.1). This platform drives ONE
+    /// output for now, so the first entry wins — the router publishes them highest-priority first —
+    /// and an empty list hides the layer. Two outputs here are the follow-up (§4.2).
+    pub fn set_surfaces(&self, surfaces: &[SinkSurface]) {
+        match surfaces.first() {
+            Some(s) => {
+                self.set_rect(s.full.0, s.full.1, s.full.2, s.full.3, s.clip.0, s.clip.1, s.clip.2, s.clip.3);
+                self.set_visible(true);
+            }
+            None => self.set_visible(false),
+        }
+    }
+
     /// On-screen video rect (PHYSICAL px, window coords): FULL box + VISIBLE box — the
     /// host lays the widget out in the full box and clips it at the visible edge.
     #[allow(clippy::too_many_arguments)]
-    pub fn set_rect(&self, x: i32, y: i32, w: i32, h: i32, cx: i32, cy: i32, cw: i32, ch: i32) {
+    fn set_rect(&self, x: i32, y: i32, w: i32, h: i32, cx: i32, cy: i32, cw: i32, ch: i32) {
         self.geom.lock().unwrap().rect = Some([x, y, w, h, cx, cy, cw, ch]);
         self.apply_rect();
     }
@@ -443,7 +457,7 @@ impl LinuxVideoSink {
         );
     }
 
-    pub fn set_visible(&self, visible: bool) {
+    fn set_visible(&self, visible: bool) {
         linux_host::set_visible(visible);
     }
 
