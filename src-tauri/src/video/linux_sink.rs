@@ -5,10 +5,19 @@
 //! `win_sink` (Media Foundation) and `android_sink` (MediaCodec). H.264/HEVC access units
 //! from the RTSP client go into
 //!
-//!   appsrc → h264parse/h265parse → decodebin3 → glupload → glcolorconvert → glvideoflip
-//!   → gtkglsink
+//!   appsrc → h264parse/h265parse → decodebin3 → tee
+//!                                                  ├→ queue → valve → [leg] → gtkglsink   (slot 0)
+//!                                                  └→ queue → valve → [leg] → gtkglsink   (slot 1)
+//!   leg = glupload → glcolorconvert → glvideoflip
 //!
-//! and the gtkglsink's GtkGLArea widget is what `linux_host` places below the WebView.
+//! and each gtkglsink's GtkGLArea widget is what `linux_host` places below the WebView, one per
+//! slot (VIDEO_MULTISINK_WINDOW.md §4.2 — the video widget and the floating window at once).
+//!
+//! BOTH branches are built up front and stay for the sink's life: the maximum is known (two), and
+//! adding a branch to a running pipeline means pad blocking and re-negotiation, which on the Pi's
+//! stateless decoder is exactly the kind of interruption it cannot conceal. An unused branch is
+//! idled by its `valve`, which drops buffers before the colour convert and the render — the decode
+//! is upstream of the tee, so a second surface costs a convert and a render, never a second decode.
 //! decodebin3 picks the decoder the machine has — VA-API (`vah264dec`/`vah265dec`, Intel/
 //! AMD), V4L2 (Pi 4 H264 stateful, Pi 5 HEVC stateless `v4l2slh265dec`) or software
 //! (`avdec_*`) — and the GL leg imports DMABuf output without a copy where the decoder
@@ -115,8 +124,7 @@ struct Pacing {
 pub struct LinuxVideoSink {
     pipeline: gst::Pipeline,
     appsrc: gst_app::AppSrc,
-    flip: gst::Element,
-    sink: gst::Element,
+    branches: Vec<Branch>,
     shared: Arc<Shared>,
     pacing: Mutex<Pacing>,
     bus_thread: Option<JoinHandle<()>>,
@@ -135,9 +143,30 @@ pub fn hevc_decoder_is_stateless() -> bool {
 /// Last rect and orientation from the frontend — re-laid out when either changes.
 #[derive(Default)]
 struct Geom {
-    rect: Option<[i32; 8]>,
+    /// Per slot: the surface it currently serves and the rect that surface last published.
+    /// `None` = the slot is idle (its valve drops, its clip is hidden).
+    slots: Vec<Option<Slot>>,
     mirror: bool,
     rotate180: bool,
+}
+
+/// What a slot is showing right now.
+#[derive(Clone)]
+struct Slot {
+    /// The surface's `window/id` — kept so a surface keeps its slot across pushes and its
+    /// widget never has to move.
+    key: String,
+    /// The surface's own rect (physical px), before the conformance-window correction.
+    rect: [i32; 8],
+}
+
+/// One pipeline branch and the elements that belong only to it.
+struct Branch {
+    /// Drops everything while this slot is idle — cheaper than blocking, and it cannot stall
+    /// the tee (which would stall the OTHER branch with it).
+    valve: gst::Element,
+    flip: gst::Element,
+    sink: gst::Element,
 }
 
 impl LinuxVideoSink {
@@ -221,41 +250,17 @@ impl LinuxVideoSink {
             });
         }
 
-        // The post-decode leg: GL (zero-copy import where the decoder offers DMABuf) or cairo.
-        let (chain, flip, sink) = if gl {
-            let upload = make("glupload")?;
-            let convert = make("glcolorconvert")?;
-            let flip = make("glvideoflip")?;
-            let sink = make("gtkglsink")?;
-            (vec![upload, convert, flip.clone(), sink.clone()], flip, sink)
-        } else {
-            let convert = make("videoconvert")?;
-            // All cores: single-threaded the Pi 5 converts a cropped 720p60 HEVC at 45 fps,
-            // with threads 57 (then the decoder's own copy is the limit).
-            convert.set_property("n-threads", 0u32);
-            let flip = make("videoflip")?;
-            let sink = make("gtksink")?;
-            (vec![convert, flip.clone(), sink.clone()], flip, sink)
-        };
-        // Latency first: render on decode. `set_buffer` flips this for the paced depths.
-        sink.set_property("sync", false);
-        // Paced mode only (no effect while unsynced): see the two constants above.
-        sink.set_property("max-lateness", LATE_TOLERANCE_NS);
-        sink.set_property("qos", false);
-
+        // One decode feeds every branch: the tee sits right behind decodebin3.
+        let tee = make("tee")?;
         pipeline
-            .add_many([appsrc.upcast_ref::<gst::Element>(), &parse, &decode])
-            .map_err(|e| format!("add: {e}"))?;
-        pipeline
-            .add_many(chain.iter())
+            .add_many([appsrc.upcast_ref::<gst::Element>(), &parse, &decode, &tee])
             .map_err(|e| format!("add: {e}"))?;
         gst::Element::link_many([appsrc.upcast_ref::<gst::Element>(), &parse, &decode])
             .map_err(|e| format!("link: {e}"))?;
-        gst::Element::link_many(chain.iter()).map_err(|e| format!("link: {e}"))?;
         // decodebin3's source pad appears once the decoder negotiated: link it then.
-        let first = chain[0].clone();
+        let tee_in = tee.clone();
         decode.connect_pad_added(move |_, pad| {
-            let Some(sinkpad) = first.static_pad("sink") else { return };
+            let Some(sinkpad) = tee_in.static_pad("sink") else { return };
             if sinkpad.is_linked() {
                 return;
             }
@@ -264,11 +269,89 @@ impl LinuxVideoSink {
             }
         });
 
+        let mut branches = Vec::with_capacity(linux_host::SLOTS);
+        for slot in 0..linux_host::SLOTS {
+            // A queue per branch so a slow one cannot stall the tee — and with it the other
+            // branch. Leaky downstream: a branch that falls behind drops its own OLD frames
+            // instead of building latency for everyone.
+            let queue = make("queue")?;
+            queue.set_property("max-size-buffers", 3u32);
+            queue.set_property("max-size-bytes", 0u32);
+            queue.set_property("max-size-time", 0u64);
+            queue.set_property_from_str("leaky", "downstream");
+            // Idle slots drop here, before the colour convert and the render. `forward-sticky-events`
+            // is not optional: the default `drop-all` swallows the CAPS event too, downstream never
+            // negotiates, and the failed caps event travels back up as `not-negotiated (-4)` at the
+            // appsrc — the whole stream dies before the first frame (Marc, Debian 13, 2026-09-08).
+            // The property is only settable in NULL/READY, hence here and not at first use.
+            let valve = make("valve")?;
+            valve.set_property_from_str("drop-mode", "forward-sticky-events");
+            valve.set_property("drop", true);
+
+            // The post-decode leg: GL (zero-copy import where the decoder offers DMABuf) or cairo.
+            //
+            // ONLY THE FIRST branch gets GL. Two `gtkglsink`s in one pipeline each bring their own
+            // GtkGLArea and therefore their own GL context, while the pipeline distributes a single
+            // one — the second branch's `glupload` then has nothing it can negotiate against and the
+            // stream dies with `not-negotiated (-4)` at the appsrc, before a frame is shown. Proven
+            // by elimination on Debian 13 (2026-09-08): the same pipeline with BOTH branches on
+            // cairo runs clean through the sink's own start/stop test, and one GL branch alone runs
+            // in the app. So the second surface is converted on the CPU. It is the cheaper half of
+            // the deal anyway: the decode is shared (the tee sits behind the decoder), and the
+            // router hands slot 0 — the GL one — to the HIGHEST-priority surface, which is the big
+            // one; the second is normally the small widget tile.
+            let gl = gl && slot == 0;
+            let (leg, flip, sink) = if gl {
+                let upload = make("glupload")?;
+                let convert = make("glcolorconvert")?;
+                let flip = make("glvideoflip")?;
+                let sink = make("gtkglsink")?;
+                (vec![upload, convert, flip.clone(), sink.clone()], flip, sink)
+            } else {
+                let convert = make("videoconvert")?;
+                // All cores: single-threaded the Pi 5 converts a cropped 720p60 HEVC at 45 fps,
+                // with threads 57 (then the decoder's own copy is the limit).
+                convert.set_property("n-threads", 0u32);
+                let flip = make("videoflip")?;
+                let sink = make("gtksink")?;
+                (vec![convert, flip.clone(), sink.clone()], flip, sink)
+            };
+            // Latency first: render on decode. `set_buffer` flips this for the paced depths.
+            sink.set_property("sync", false);
+            // A sink that receives nothing must not hold the pipeline in preroll: an idle branch's
+            // valve drops every buffer, and with the default async behaviour the PLAYING transition
+            // then never completes — the LIVE branch shows its one preroll frame and freezes
+            // (Marc, 2026-09-08).
+            sink.set_property("async", false);
+            // Paced mode only (no effect while unsynced): see the two constants above.
+            sink.set_property("max-lateness", LATE_TOLERANCE_NS);
+            sink.set_property("qos", false);
+
+            let mut chain = vec![queue.clone(), valve.clone()];
+            chain.extend(leg);
+            pipeline.add_many(chain.iter()).map_err(|e| format!("add: {e}"))?;
+            gst::Element::link_many(chain.iter()).map_err(|e| format!("link: {e}"))?;
+            tee.link(&queue).map_err(|e| format!("link tee->queue: {e}"))?;
+
+            // The widget must exist (and be realized, for GL) before the sink starts.
+            let widget_sink = sink.clone();
+            let placed = linux_host::attach(slot, move || {
+                Some(widget_sink.property::<gtk::Widget>("widget"))
+            });
+            match placed.recv_timeout(ATTACH_TIMEOUT) {
+                Ok(true) => {}
+                Ok(false) => return Err("the host has no place for the video widget".to_string()),
+                Err(_) => return Err("the video host did not answer (not installed?)".to_string()),
+            }
+            branches.push(Branch { valve, flip, sink });
+        }
+
         let shared = Arc::new(Shared::default());
-        // Frames reaching the sink = presented (the sink renders every buffer at depth 0 and
-        // the on-time ones when paced); the caps event carries the DISPLAY size — decoders
-        // report the cropped picture there, the coded size stays in the meta.
-        if let Some(pad) = sink.static_pad("sink") {
+        // Counted at the TEE's input, not at a sink: it is one number for the stream (as on the
+        // other platforms), and a probe on one branch would read zero whenever that slot is the
+        // idle one. The caps event carries the DISPLAY size — decoders report the cropped picture
+        // there, the coded size stays in the meta.
+        if let Some(pad) = tee.static_pad("sink") {
             let s = shared.clone();
             pad.add_probe(gst::PadProbeType::BUFFER, move |_, _| {
                 s.presented.fetch_add(1, Ordering::Relaxed);
@@ -291,15 +374,6 @@ impl LinuxVideoSink {
                 }
                 gst::PadProbeReturn::Ok
             });
-        }
-
-        // The widget must exist (and be realized, for GL) before the sink starts.
-        let widget_sink = sink.clone();
-        let placed = linux_host::attach(move || Some(widget_sink.property::<gtk::Widget>("widget")));
-        match placed.recv_timeout(ATTACH_TIMEOUT) {
-            Ok(true) => {}
-            Ok(false) => return Err("the host has no place for the video widget".to_string()),
-            Err(_) => return Err("the video host did not answer (not installed?)".to_string()),
         }
 
         let bus = pipeline.bus().ok_or("no pipeline bus")?;
@@ -326,13 +400,16 @@ impl LinuxVideoSink {
         Ok(Self {
             pipeline,
             appsrc,
-            flip,
-            sink,
+            branches,
             shared,
             pacing: Mutex::new(Pacing::default()),
             bus_thread,
             window,
-            geom: Mutex::new(Geom::default()),
+            geom: Mutex::new(Geom {
+                slots: vec![None; linux_host::SLOTS],
+                mirror: false,
+                rotate180: false,
+            }),
         })
     }
 
@@ -402,40 +479,75 @@ impl LinuxVideoSink {
         self.shared.error.lock().unwrap().clone()
     }
 
-    /// The surfaces to present into (VIDEO_MULTISINK_WINDOW.md §4.1). This platform drives ONE
-    /// output for now, so the first entry wins — the router publishes them highest-priority first —
-    /// and an empty list hides the layer. Two outputs here are the follow-up (§4.2).
+    /// The surfaces to present into (VIDEO_MULTISINK_WINDOW.md §4.1), highest priority first and
+    /// capped at [`linux_host::SLOTS`]. A surface keeps the slot it already had — its branch owns a
+    /// realized GL widget, so moving a picture between slots would mean moving that widget, which
+    /// is precisely what must not happen (see `linux_host`). Slots nobody claims are idled: valve
+    /// dropping, clip hidden.
     ///
     /// Only the MAIN window's surfaces are servable: the GTK host layer lives there, so a surface
     /// published by the detached video window has nowhere to go here and must not be drawn into the
-    /// main window instead (a second host is the same follow-up).
+    /// main window instead. A second host — a second window's own overlay tree — is the follow-up.
     pub fn set_surfaces(&self, surfaces: &[SinkSurface]) {
-        match surfaces.iter().find(|s| s.window == "main") {
-            Some(s) => {
-                self.set_rect(s.full.0, s.full.1, s.full.2, s.full.3, s.clip.0, s.clip.1, s.clip.2, s.clip.3);
-                self.set_visible(true);
+        let want: Vec<&SinkSurface> = surfaces
+            .iter()
+            .filter(|s| s.window == "main")
+            .take(linux_host::SLOTS)
+            .collect();
+
+        let mut g = self.geom.lock().unwrap();
+        // Keep every surface that still wants a slot where it is, then fill the freed slots with
+        // the newcomers in priority order.
+        for slot in g.slots.iter_mut() {
+            if let Some(cur) = slot {
+                if !want.iter().any(|s| s.key == cur.key) {
+                    *slot = None;
+                }
             }
-            None => self.set_visible(false),
+        }
+        for s in &want {
+            let rect = [s.full.0, s.full.1, s.full.2, s.full.3, s.clip.0, s.clip.1, s.clip.2, s.clip.3];
+            if let Some(cur) = g.slots.iter_mut().flatten().find(|c| c.key == s.key) {
+                cur.rect = rect;
+                continue;
+            }
+            let Some(free) = g.slots.iter_mut().find(|c| c.is_none()) else { continue };
+            *free = Some(Slot { key: s.key.clone(), rect });
+        }
+        // Which slot each surface ended up in, in the published (priority) order — the host stacks
+        // the clips by it, because two surfaces may overlap.
+        let order: Vec<usize> = want
+            .iter()
+            .filter_map(|s| g.slots.iter().position(|c| c.as_ref().is_some_and(|c| c.key == s.key)))
+            .collect();
+        let live: Vec<bool> = g.slots.iter().map(|c| c.is_some()).collect();
+        drop(g);
+
+        for (slot, on) in live.iter().enumerate() {
+            if let Some(b) = self.branches.get(slot) {
+                b.valve.set_property("drop", !on);
+            }
+            if *on {
+                self.apply_rect(slot);
+            }
+            linux_host::set_visible(slot, *on);
+        }
+        if !order.is_empty() {
+            linux_host::restack(order);
         }
     }
 
-    /// On-screen video rect (PHYSICAL px, window coords): FULL box + VISIBLE box — the
-    /// host lays the widget out in the full box and clips it at the visible edge.
-    #[allow(clippy::too_many_arguments)]
-    fn set_rect(&self, x: i32, y: i32, w: i32, h: i32, cx: i32, cy: i32, cw: i32, ch: i32) {
-        self.geom.lock().unwrap().rect = Some([x, y, w, h, cx, cy, cw, ch]);
-        self.apply_rect();
-    }
-
-    /// Lay the widget out. With a stripped window the DISPLAY picture is aspect-fitted into
+    /// Lay one slot's widget out. With a stripped window the DISPLAY picture is aspect-fitted into
     /// the full box and the widget grown to the CODED picture around it, so the padding rows
     /// fall outside the visible box; the visible box is also clipped to the fitted picture
     /// (a letterboxed box would otherwise show the padding in its bars).
-    fn apply_rect(&self) {
+    fn apply_rect(&self, slot: usize) {
         let g = self.geom.lock().unwrap();
-        let Some([x, y, w, h, cx, cy, cw, ch]) = g.rect else { return };
+        let Some(Some([x, y, w, h, cx, cy, cw, ch])) = g.slots.get(slot).map(|c| c.as_ref().map(|c| c.rect)) else {
+            return;
+        };
         let Some(win) = self.window else {
-            linux_host::set_rect(x, y, w, h, cx, cy, cw, ch);
+            linux_host::set_rect(slot, [x, y, w, h, cx, cy, cw, ch]);
             return;
         };
         let (dw, dh) = (win.display_w().max(1) as f64, win.display_h().max(1) as f64);
@@ -450,19 +562,18 @@ impl LinuxVideoSink {
         let (vx2, vy2) = (((cx + cw) as f64).min(fx + fw), ((cy + ch) as f64).min(fy + fh));
         let r = |v: f64| v.round() as i32;
         linux_host::set_rect(
-            r(fx - left * scale),
-            r(fy - top * scale),
-            r(win.coded_w as f64 * scale),
-            r(win.coded_h as f64 * scale),
-            r(vx),
-            r(vy),
-            r((vx2 - vx).max(1.0)),
-            r((vy2 - vy).max(1.0)),
+            slot,
+            [
+                r(fx - left * scale),
+                r(fy - top * scale),
+                r(win.coded_w as f64 * scale),
+                r(win.coded_h as f64 * scale),
+                r(vx),
+                r(vy),
+                r((vx2 - vx).max(1.0)),
+                r((vy2 - vy).max(1.0)),
+            ],
         );
-    }
-
-    fn set_visible(&self, visible: bool) {
-        linux_host::set_visible(visible);
     }
 
     /// Smoothing-buffer depth in frames (0 = render on decode, the latency-first default).
@@ -470,7 +581,9 @@ impl LinuxVideoSink {
         let frames = frames.min(3);
         let before = self.shared.buffer_frames.swap(frames, Ordering::Relaxed);
         if (before == 0) != (frames == 0) {
-            self.sink.set_property("sync", frames > 0);
+            for b in &self.branches {
+                b.sink.set_property("sync", frames > 0);
+            }
         }
     }
 
@@ -482,14 +595,25 @@ impl LinuxVideoSink {
             (false, true) => "180",
             (true, true) => "vert", // mirror + 180° = vertical flip
         };
-        self.flip.set_property_from_str("video-direction", direction);
-        {
+        // Per branch: the flip element belongs to one leg, so every leg needs telling.
+        for b in &self.branches {
+            b.flip.set_property_from_str("video-direction", direction);
+        }
+        let live: Vec<usize> = {
             let mut g = self.geom.lock().unwrap();
             g.mirror = mirror;
             g.rotate180 = rotate180;
-        }
+            g.slots
+                .iter()
+                .enumerate()
+                .filter_map(|(i, c)| c.is_some().then_some(i))
+                .collect()
+        };
+        // A flip moves the conformance-window padding, so every live slot is laid out again.
         if self.window.is_some() {
-            self.apply_rect();
+            for slot in live {
+                self.apply_rect(slot);
+            }
         }
     }
 
