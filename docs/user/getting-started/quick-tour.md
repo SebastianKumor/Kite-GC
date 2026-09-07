@@ -308,8 +308,8 @@ room for either the map or a widget, rarely both. Tablets keep the desktop layou
   The **video widget** works as on the desktop (double-tap swaps there too); while it is active, the
   docked window and its button stay hidden. Whatever is off-screen — a parked window, a widget on the
   other page — is not rendered, but the stream keeps running, so it is back instantly.
-- **Not on the phone**: the video preview inside the Video panel, the raw-telemetry popup, and the
-  stick overlay beside the replay player.
+- **Not on the phone**: the detached video window, the raw-telemetry popup, and the stick overlay
+  beside the replay player.
 
 ## Where to go next
 
