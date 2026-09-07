@@ -209,7 +209,9 @@ const PREF_DEFAULTS: VideoPrefs = {
   disableHwAccel: false,
   mirror: false,
   rotate180: false,
-  floating: false,
+  // Shown by default: since the Video panel lost its preview, the floating window (the docked
+  // window on the phone) is where a freshly started source appears.
+  floating: true,
   floatSnapped: true,
   floatX: 16,
   floatY: 80,
@@ -508,10 +510,63 @@ function logVideo(level: 'warn' | 'info' | 'debug', message: string): void {
   void invoke('log_frontend', { level, area: 'video', message }).catch(() => {});
 }
 
-/** Bind a sink's `<video>` element to the shared MediaStream (camera or rtsp). */
+/** Sink elements that already report their picture size (one listener per element). */
+const sizeReporters = new WeakSet<HTMLVideoElement>();
+
+/** Bind a sink's `<video>` element to the shared MediaStream (camera or rtsp). Every bound sink
+ *  also reports the picture size from its `loadedmetadata` — the Video panel's preview used to be
+ *  the one place doing that, and it is gone; whichever surface shows the feed now feeds the aspect
+ *  ratio (change-guarded in `reportVideoSize`, so several sinks reporting the same size is free). */
 export function bindVideoEl(el: HTMLVideoElement | null, stream: MediaStream | null): void {
   if (!el) return;
   el.srcObject = stream;
+  if (!sizeReporters.has(el)) {
+    sizeReporters.add(el);
+    el.addEventListener('loadedmetadata', () => reportVideoSize(el.videoWidth, el.videoHeight));
+  }
+}
+
+/** `onload` of a sink's MJPEG `<img>` (the fallback path without the off-thread reader): report the
+ *  picture size. Engines that fire `load` per multipart frame hit the change guard after the first. */
+export function reportImgSize(e: Event): void {
+  const img = e.currentTarget as HTMLImageElement;
+  if (img.naturalWidth) reportVideoSize(img.naturalWidth, img.naturalHeight);
+}
+
+/** Frames per second a visible `<video>` sink actually presents (`requestVideoFrameCallback`), for
+ *  the panel's info line on the camera / getUserMedia path — the one path with no pipeline counter
+ *  of its own (WebRTC has its inbound stats, MJPEG its reader, the native sink the backend). 0 while
+ *  no probed sink is on screen. */
+export const videoElFps = writable(0);
+
+/** Svelte action for a sink's `<video>`: count its presented frames into `videoElFps` while mounted.
+ *  Several probed sinks write the same number — they present the same stream. */
+export function fpsProbe(el: HTMLVideoElement): { destroy(): void } {
+  const v = el as HTMLVideoElement & {
+    requestVideoFrameCallback?: (cb: (now: number) => void) => number;
+    cancelVideoFrameCallback?: (h: number) => void;
+  };
+  if (!v.requestVideoFrameCallback) return { destroy() {} };
+  let frames = 0;
+  let last = performance.now();
+  let handle = 0;
+  const tick = (now: number) => {
+    frames++;
+    const dt = now - last;
+    if (dt >= 1000) {
+      videoElFps.set((frames * 1000) / dt);
+      frames = 0;
+      last = now;
+    }
+    handle = v.requestVideoFrameCallback!(tick);
+  };
+  handle = v.requestVideoFrameCallback(tick);
+  return {
+    destroy() {
+      v.cancelVideoFrameCallback?.(handle);
+      videoElFps.set(0);
+    },
+  };
 }
 
 /** Report the natural size of the live source (from a sink's `loadedmetadata`) so the
@@ -1655,8 +1710,16 @@ export function stopVideo(): void {
 }
 
 export function toggleVideo(): void {
-  if (get(videoState).enabled) stopVideo();
-  else void startActive();
+  if (get(videoState).enabled) {
+    stopVideo();
+    return;
+  }
+  // Starting a source brings the floating window (the docked window on the phone) back on screen
+  // — the panel has no preview, so this is where the picture appears. Parking it afterwards is the
+  // toggle's job, and the source runs on while it is parked.
+  patch({ floating: true });
+  savePrefs();
+  void startActive();
 }
 
 /** Switch source kind (camera ⇄ rtsp); restarts the new source if video was running. */
@@ -1859,6 +1922,40 @@ export async function setDisableHwAccel(disableHwAccel: boolean): Promise<void> 
 }
 
 // ── Floating window ──────────────────────────────────────────────────
+/** The floating window's glass bezel (css px, in the zoomed chrome layer): the video sits inside it,
+ *  and so does the swapped-in map — +page places the map into the frame's INNER box. */
+export const FLOAT_BEZEL_PX = 4;
+/** Minimum window height (css px): the mini-map's 4 stacked control buttons (4×38 + 3×8 gap + 8
+ *  bottom offset + breathing room) must never overflow the frame when the map is swapped in. */
+export const FLOAT_MIN_H_PX = 200;
+/** Height caps as a fraction of the viewport height. */
+export const FLOAT_FRAC_MIN = 0.1;
+export const FLOAT_FRAC_MAX = 0.3;
+/** Widest the window may get (fraction of the viewport width). */
+export const FLOAT_MAX_W_FRAC = 0.7;
+/** Snapped position: this far from the left edge, and this far above the viewport bottom (the
+ *  24 px status bar + the widget dock's 6 px gap). */
+export const FLOAT_MARGIN_PX = 8;
+export const FLOAT_SNAP_BOTTOM_PX = 30;
+/** The show/hide toggle button (square) and its gap to the frame. */
+export const FLOAT_BTN_PX = 38;
+export const FLOAT_BTN_GAP_PX = 8;
+
+/** The floating window's OUTER box (css px in the chrome layer) for a viewport — ONE computation
+ *  for the window itself and for +page, which places the swapped-in map and the dock reserve by it.
+ *  The picture's box is the inner one (outer minus the bezel), and THAT carries the stream's aspect
+ *  ratio exactly — sized from the inside out, or the bezel's 8 px would leave hairline bars. */
+export function floatFrameRect(s: VideoState, vw: number, vh: number): { left: number; top: number; width: number; height: number } {
+  const aspect = s.aspect || 16 / 9;
+  const height = Math.min(Math.round(FLOAT_FRAC_MAX * vh), Math.max(FLOAT_MIN_H_PX, Math.round(s.floatHeightFrac * vh)));
+  const innerH = height - 2 * FLOAT_BEZEL_PX;
+  const innerW = Math.min(Math.round(innerH * aspect), Math.round(vw * FLOAT_MAX_W_FRAC) - 2 * FLOAT_BEZEL_PX);
+  const width = innerW + 2 * FLOAT_BEZEL_PX;
+  const left = s.floatSnapped ? FLOAT_MARGIN_PX : s.floatX;
+  const top = s.floatSnapped ? vh - height - FLOAT_SNAP_BOTTOM_PX : s.floatY;
+  return { left, top, width, height };
+}
+
 export function toggleFloating(): void {
   patch({ floating: !get(videoState).floating });
   savePrefs();
@@ -1875,10 +1972,8 @@ export function setFloatPos(floatX: number, floatY: number): void {
   savePrefs();
 }
 
-const FLOAT_MIN = 0.1;
-const FLOAT_MAX = 0.3;
 export function setFloatHeightFrac(frac: number): void {
-  patch({ floatHeightFrac: Math.min(FLOAT_MAX, Math.max(FLOAT_MIN, frac)) });
+  patch({ floatHeightFrac: Math.min(FLOAT_FRAC_MAX, Math.max(FLOAT_FRAC_MIN, frac)) });
   savePrefs();
 }
 

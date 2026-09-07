@@ -11,7 +11,7 @@
 //
 //   1. pick the ONE surface that shows the video — exactly one hardware layer exists, so the
 //      registered candidate with the highest priority wins (fullscreen map-swap > floating
-//      window > widget tile > panel preview); the others show a placeholder,
+//      window > widget tile); the others show a placeholder,
 //   2. push that surface's rect (physical px) to the backend so the native layer tracks it,
 //   3. cut the hole: a clip-path with a reversed inner ring on every DOM layer that paints
 //      UNDER the surface (the map, the surface's own glass container, the page ground) — and
@@ -22,11 +22,10 @@
 // layer behind it shows the DESKTOP through the transparent app window (spike finding).
 //
 // Layers opt in: elements carrying `data-nv-clip` are clipped wherever they intersect the
-// hole (the unzoomed map layer). The active surface's PanelShell ancestor (`.ps`, glass +
-// backdrop-filter) is picked up automatically for the panel preview. The video widget's
-// card is deliberately NOT a clip target: per-frame clip churn on its backdrop-filtered
-// glass flickered during window resizes — the armed tile paints its bezel with ring-only
-// properties instead (see VideoWidget.svelte).
+// hole (the unzoomed map layer). The video widget's card and the floating window's frame are
+// deliberately NOT clip targets: per-frame clip churn on their backdrop-filtered glass
+// flickered during window resizes — the armed surface paints its bezel with ring-only
+// properties instead (see VideoWidget.svelte / FloatingVideoWindow.svelte).
 // The page ground (`body`'s background) cannot be clipped directly — clip-path on `body`
 // would clip the whole app — so while the router runs, the body background moves onto an
 // injected fixed div behind everything, and THAT gets the hole.
@@ -41,12 +40,10 @@
 import { writable, get } from 'svelte/store';
 import { invoke } from '@tauri-apps/api/core';
 
-export type NativeSurfaceId = 'main' | 'floating' | 'widget' | 'preview';
+export type NativeSurfaceId = 'main' | 'floating' | 'widget';
 
-/** Highest first: the fullscreen map-swap view beats the floating window beats the widget
- *  tile beats the panel preview (the preview must never steal the picture from a flight
- *  surface just because the panel was opened). */
-const PRIORITY: NativeSurfaceId[] = ['main', 'floating', 'widget', 'preview'];
+/** Highest first: the fullscreen map-swap view beats the floating window beats the widget tile. */
+const PRIORITY: NativeSurfaceId[] = ['main', 'floating', 'widget'];
 
 /** The surface currently showing the native video (null = none → sink hidden). Surfaces
  *  render their transparent hole only while THEY are active, a placeholder otherwise. */
@@ -198,7 +195,14 @@ function visibleRect(el: HTMLElement, rect: DOMRect, id: NativeSurfaceId): DOMRe
   // that live INSIDE the column (the widget tile) are exempt — the column's own overflow clips
   // them, and the bound would blank them entirely.
   if (rightBound != null && id !== 'widget' && x2 > rightBound) { x2 = rightBound; byR = 'bound'; }
-  if (x2 <= x1) return null;
+  // The viewport itself: a surface sliding off the screen (the floating window parking, its
+  // transform carries it past the left edge) keeps its full box for the layout and loses the
+  // off-screen part of the clip — the sinks never see a negative or oversized visible box.
+  if (x1 < 0) { x1 = 0; byL = 'viewport'; }
+  if (y1 < 0) { y1 = 0; byT = 'viewport'; }
+  if (x2 > window.innerWidth) { x2 = window.innerWidth; byR = 'viewport'; }
+  if (y2 > window.innerHeight) { y2 = window.innerHeight; byB = 'viewport'; }
+  if (x2 <= x1 || y2 <= y1) return null;
   if (Math.abs(x1 - rect.left) < SNAP) { x1 = rect.left; byL = ''; }
   if (Math.abs(y1 - rect.top) < SNAP) { y1 = rect.top; byT = ''; }
   if (Math.abs(x2 - rect.right) < SNAP) { x2 = rect.right; byR = ''; }
@@ -303,7 +307,7 @@ function tick(): void {
         nativeHoleDebug.set(dbg);
       }
     }
-    applyClips(c.el, snapped, {
+    applyClips(snapped, {
       tl: cutTop || cutLeft ? 0 : radius,
       tr: cutTop || cutRight ? 0 : radius,
       bl: cutBottom || cutLeft ? 0 : radius,
@@ -373,12 +377,9 @@ function holePath(el: HTMLElement, hole: DOMRect, radii: HoleRadii): string | nu
   );
 }
 
-function applyClips(surfaceEl: HTMLElement, hole: DOMRect, radius: HoleRadii): void {
+function applyClips(hole: DOMRect, radius: HoleRadii): void {
   const targets = new Set<HTMLElement>();
   for (const el of document.querySelectorAll<HTMLElement>('[data-nv-clip]')) targets.add(el);
-  // The panel preview sits on a glass PanelShell — clip that instance too.
-  const shell = surfaceEl.closest<HTMLElement>('.ps');
-  if (shell) targets.add(shell);
   targets.add(ensureGround());
   for (const el of targets) {
     const path = holePath(el, hole, radius);
