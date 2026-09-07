@@ -14,7 +14,7 @@
      it) and passes it down. -->
 <script lang="ts">
   import { t } from 'svelte-i18n';
-  import { videoStream, videoState, bindVideoEl, setMapLocation, toggleFloating, reportMjpegError } from '$lib/stores/video';
+  import { videoStream, videoState, bindVideoEl, setMapLocation, toggleFloating, reportMjpegError, reportImgSize, fpsProbe } from '$lib/stores/video';
   import { canvasSink, mjpegSink } from '$lib/controllers/mjpegSink';
   import { nativeSurface, activeNativeSurface } from '$lib/controllers/nativeVideo';
   import { doubleTap, mouseDoubleClick } from '$lib/helpers/doubleTap';
@@ -136,11 +136,11 @@
             <canvas use:mjpegSink class:mirror={$videoState.mirror} class:rot180={$videoState.rotate180}></canvas>
           {:else}
             <!-- svelte-ignore a11y_missing_attribute -->
-            <img src={$videoState.mjpegUrl} class:mirror={$videoState.mirror} class:rot180={$videoState.rotate180} onerror={reportMjpegError} />
+            <img src={$videoState.mjpegUrl} class:mirror={$videoState.mirror} class:rot180={$videoState.rotate180} onload={reportImgSize} onerror={reportMjpegError} />
           {/if}
         {:else if live}
           <!-- svelte-ignore a11y_media_has_caption -->
-          <video bind:this={videoEl} autoplay muted playsinline class:mirror={$videoState.mirror} class:rot180={$videoState.rotate180}></video>
+          <video bind:this={videoEl} use:fpsProbe autoplay muted playsinline class:mirror={$videoState.mirror} class:rot180={$videoState.rotate180}></video>
         {/if}
         <VideoReconnectOverlay />
       </div>
