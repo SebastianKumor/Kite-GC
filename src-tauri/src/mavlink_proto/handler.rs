@@ -187,6 +187,8 @@ fn handler_loop(
     // transition rather than every loop.
     let mut rc_fast_read = false;
 
+    // A stale offset from the previous vehicle would be applied to this one's altitudes.
+    super::control::clear_amsl_offset();
     log::info!("MAVLink handler started (FC sysid={} compid={})", fc_sysid, fc_compid);
 
     loop {
@@ -652,6 +654,9 @@ fn dispatch_message(header: &MavHeader, message: &MavMessage, fc_variant: &str, 
             fused.lat = gpi.lat as f64 / 1e7;
             fused.lon = gpi.lon as f64 / 1e7;
             fused.alt_msl = gpi.alt as f64 / 1000.0; // mm → m
+            // Both altitudes in one message, which is the only place the AMSL-to-relative offset can
+            // be read without correlating two streams (see control::AMSL_OFFSET_MM).
+            super::control::note_amsl_offset(gpi.alt, gpi.relative_alt);
             fused.ground_speed = ((gpi.vx as f64).powi(2) + (gpi.vy as f64).powi(2)).sqrt() / 100.0; // cm/s → m/s
             // Course over ground from the fused horizontal velocity (vx=North, vy=East). NOTE: `gpi.hdg`
             // is the vehicle HEADING (yaw), not COG — heading is sourced from ATTITUDE.yaw, so don't

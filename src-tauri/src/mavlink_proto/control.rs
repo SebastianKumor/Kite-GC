@@ -12,6 +12,7 @@
 // asynchronously with COMMAND_ACK (ACCEPTED / DENIED / TEMPORARILY_REJECTED / UNSUPPORTED / …).
 // We register a receiver, send, then match the ACK by command id and resolve the blocking call.
 
+use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -98,6 +99,35 @@ pub fn send_command_int(
     result
 }
 
+/// AMSL minus relative altitude, in millimetres, or `NO_OFFSET` when no `GLOBAL_POSITION_INT` has
+/// arrived on this link yet. Only `reposition` reads it, to convert a relative altitude to the AMSL
+/// one MAV_FRAME_GLOBAL wants.
+///
+/// Taken from the single message that carries both altitudes rather than correlating two: `alt_msl`
+/// reaches the frontend from GPS_RAW_INT while the relative altitude only comes from
+/// GLOBAL_POSITION_INT, so subtracting the two stores would read a still-zero relative altitude
+/// whenever GPS_RAW_INT lands first and yield an offset the size of the whole AMSL altitude.
+const NO_OFFSET: i32 = i32::MIN;
+static AMSL_OFFSET_MM: AtomicI32 = AtomicI32::new(NO_OFFSET);
+
+/// Record the offset from a GLOBAL_POSITION_INT (both altitudes in mm, as the message carries them).
+pub fn note_amsl_offset(alt_mm: i32, relative_alt_mm: i32) {
+    AMSL_OFFSET_MM.store(alt_mm.saturating_sub(relative_alt_mm), Ordering::Relaxed);
+}
+
+/// Forget the offset. Called when a MAVLink handler starts so a new vehicle, or the same vehicle at
+/// a different field, cannot inherit the last one.
+pub fn clear_amsl_offset() {
+    AMSL_OFFSET_MM.store(NO_OFFSET, Ordering::Relaxed);
+}
+
+fn amsl_offset_m() -> Option<f32> {
+    match AMSL_OFFSET_MM.load(Ordering::Relaxed) {
+        NO_OFFSET => None,
+        mm => Some(mm as f32 / 1000.0),
+    }
+}
+
 /// Send a `COMMAND_INT`, returning the FC's raw result instead of a message. Same wire format as
 /// `send_command_int`; used where the caller adapts to the refusal (see `reposition`).
 #[allow(clippy::too_many_arguments)]
@@ -144,11 +174,9 @@ fn command_int_result(
 /// (telemetry/mavlink.c, `handleIncoming_COMMAND_INT`: the relative-alt and terrain frames are
 /// commented out). On that specific refusal we retry once with `GLOBAL` and an AMSL altitude.
 ///
-/// `amsl_offset` converts the relative altitude to AMSL and comes from the vehicle's own telemetry
-/// (`GLOBAL_POSITION_INT.alt - relative_alt`), not from a stored home altitude: INAV never sends
-/// HOME_POSITION, so that is the only source available on this link. `None` means the offset is not
-/// known yet, and then there is nothing honest to retry with.
-#[allow(clippy::too_many_arguments)]
+/// The AMSL offset comes from the vehicle's own GLOBAL_POSITION_INT (see `AMSL_OFFSET_MM`), not from
+/// a stored home altitude: INAV never sends HOME_POSITION, so that is the only source available on
+/// this link. Without it there is nothing honest to retry with, so the original refusal stands.
 pub fn reposition(
     cmd_tx: &mpsc::Sender<MavlinkCommand>,
     fc_sysid: u8,
@@ -156,7 +184,6 @@ pub fn reposition(
     x: i32,
     y: i32,
     rel_alt: f32,
-    amsl_offset: Option<f32>,
 ) -> Result<(), String> {
     let first = command_int_result(
         cmd_tx, fc_sysid, MavFrame::MAV_FRAME_GLOBAL_RELATIVE_ALT,
@@ -165,7 +192,7 @@ pub fn reposition(
     if first != MavResult::MAV_RESULT_UNSUPPORTED {
         return result_to_err(first);
     }
-    let Some(offset) = amsl_offset else {
+    let Some(offset) = amsl_offset_m() else {
         log::warn!("DO_REPOSITION refused as UNSUPPORTED and no AMSL offset is known yet");
         return result_to_err(first);
     };
@@ -308,4 +335,30 @@ fn wait_for_ack(
     timeout: Duration,
 ) -> Result<(), String> {
     result_to_err(wait_for_ack_result(rx, command, timeout)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The offset must come from one GLOBAL_POSITION_INT, not from two separately-stored altitudes.
+    /// GPS_RAW_INT populates the frontend's AMSL while the relative altitude is still zero, so
+    /// subtracting the two stores there produced an offset the size of the whole AMSL altitude and a
+    /// retried reposition hundreds of metres high.
+    #[test]
+    fn amsl_offset_is_unknown_until_a_position_message_arrives() {
+        clear_amsl_offset();
+        assert_eq!(amsl_offset_m(), None);
+
+        // 110 m AMSL while 80 m above home: the field is at 30 m.
+        note_amsl_offset(110_000, 80_000);
+        assert_eq!(amsl_offset_m(), Some(30.0));
+
+        // A negative offset (below-sea-level field) is a real case, not an error.
+        note_amsl_offset(-5_000, 10_000);
+        assert_eq!(amsl_offset_m(), Some(-15.0));
+
+        clear_amsl_offset();
+        assert_eq!(amsl_offset_m(), None, "a new link must not inherit the last vehicle's offset");
+    }
 }

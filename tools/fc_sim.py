@@ -2170,9 +2170,13 @@ def build_settings(iv, args):
         'nav_fw_loiter_radius': int(iv.v.radius * 100),   # cm, and the live radius not the default
         'nav_fw_cruise_speed': int(iv.v.cruise_speed * 100),
         'nav_wp_radius': int(p['wp_radius'] * 100),
-        'nav_fw_climb_angle': 20,
-        'nav_fw_dive_angle': 15,
-        'nav_rth_altitude': int(iv.v.cruise_alt * 100),
+        # Reported from the same limits the model pitches to, so a written angle and the flown
+        # climb cannot disagree.
+        'nav_fw_climb_angle': round(math.degrees(p['pitch_up'])),
+        'nav_fw_dive_angle': round(math.degrees(p['pitch_dn'])),
+        # The altitude RTH really climbs to in the model, not the cruise altitude: a GCS that reads
+        # this setting and then triggers RTH has to see the two agree.
+        'nav_rth_altitude': int(p['rtl_alt'] * 100),
         'nav_rth_climb_first': 1,
         'nav_max_auto_speed': int(iv.v.cruise_speed * 100),
         'battery_capacity': 5000,
