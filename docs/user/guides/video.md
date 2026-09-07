@@ -274,9 +274,11 @@ cannot fix from its side on that classic path:
   advanced capture path around that layer entirely), but a camera the system itself can't open cleanly
   is out of reach.
 - **The detached video window is not available on Linux.** The video layer Kite draws the picture
-  on lives in the main window there, so a second window has nowhere to put it — and for the same
-  reason Linux shows the picture on one surface at a time, not two. Windows and macOS do both. All
-  the in-app surfaces (widget, floating window, full-screen swap) work everywhere.
+  on lives in the main window there, so a second window has nowhere to put it. Showing the picture
+  in **two places at once** does work on Linux; the second place is converted on the processor
+  rather than the graphics chip (two hardware-accelerated video surfaces cannot share one pipeline),
+  which on a desktop costs a few percent of one core for a widget-sized tile. All the in-app
+  surfaces (widget, floating window, full-screen swap) work everywhere.
 
 None of this means Linux is unusable — with the **Native RTSP client** it is a first-class platform
 for network video, and a well-equipped desktop distribution generally plays the classic path fine

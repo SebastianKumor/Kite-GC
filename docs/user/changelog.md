@@ -39,7 +39,7 @@ below. The release you are reading the docs for is expanded; click an older vers
     ??? info "Video in two places at once — and on a screen of its own"
         With Kite's own RTSP client the picture now runs in the **Video widget and a large surface at
         the same time** — the floating window or the fullscreen swap — the way the other sources
-        always did. One decode feeds both. [#129]
+        always did. One decode feeds both — on Windows, macOS and Linux. [#129] · [#132] · [#133]
 
         **And it can leave the app.** Hover the floating window and a **broken-chain button** appears
         in its top-left corner: the frame moves out into its own window, **always on top**, framed
@@ -128,7 +128,7 @@ below. The release you are reading the docs for is expanded; click an older vers
       client, Windows and macOS. [#130] · [#132]
     - **The video shows in two places at once** — with Kite's own RTSP client the picture now runs
       in the Video widget **and** the floating window (or the fullscreen swap) at the same time,
-      as it always did with the other sources. One decode feeds both. [#129] · [#132]
+      as it always did with the other sources. One decode feeds both. [#129] · [#132] · [#133]
     - **Desktop video window with a park button** — Start slides the window in, the camera button
       beside it parks and recalls it while the source runs; glass bezel, resize corner, no ✕. The
       Video panel replaces its preview with a status block (state, resolution, fps, codec, bitrate). [#127]
@@ -197,3 +197,4 @@ below. The release you are reading the docs for is expanded; click an older vers
 [#129]: https://github.com/b14ckyy/Kite-GC/pull/129
 [#130]: https://github.com/b14ckyy/Kite-GC/pull/130
 [#132]: https://github.com/b14ckyy/Kite-GC/pull/132
+[#133]: https://github.com/b14ckyy/Kite-GC/pull/133
