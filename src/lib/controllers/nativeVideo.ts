@@ -507,12 +507,18 @@ function holePath(el: HTMLElement, holes: Hole[]): string | null {
   return cut ? `path('${d}')` : null;
 }
 
-/** One counter-clockwise ring for `hole`, in `el`'s LOCAL layout px, or null when it misses. */
+/** One counter-clockwise ring for `hole`, in `el`'s LOCAL layout px, or null when it misses.
+ *  Clamped to the element's box PLUS the outer margin, never to the box itself: an element's bezel
+ *  is a box-shadow painted just outside its box, and a hole that stopped at the box left exactly
+ *  that ring standing — the few pixels that kept showing through the surface above (verified in a
+ *  headless render, 2026-09-08). */
 function holeRing(hole: DOMRect, radii: HoleRadii, b: DOMRect, sx: number, sy: number): string | null {
-  const x1 = Math.max(hole.left, b.left);
-  const y1 = Math.max(hole.top, b.top);
-  const x2 = Math.min(hole.right, b.right);
-  const y2 = Math.min(hole.bottom, b.bottom);
+  const mx = OUTER_MARGIN_PX * sx;
+  const my = OUTER_MARGIN_PX * sy;
+  const x1 = Math.max(hole.left, b.left - mx);
+  const y1 = Math.max(hole.top, b.top - my);
+  const x2 = Math.min(hole.right, b.right + mx);
+  const y2 = Math.min(hole.bottom, b.bottom + my);
   if (x2 <= x1 || y2 <= y1) return null;
   const hx1 = (x1 - b.left) / sx;
   const hy1 = (y1 - b.top) / sy;
