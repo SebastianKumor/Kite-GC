@@ -72,7 +72,8 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, PeekMessageW,
     RegisterClassW, SetWindowPos, ShowWindow, TranslateMessage, HWND_BOTTOM, MSG, PM_REMOVE,
-    SWP_NOACTIVATE, SWP_NOZORDER, SW_HIDE, SW_SHOWNA, WINDOW_EX_STYLE, WNDCLASSW, WS_CHILD,
+    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_SHOWNA, WINDOW_EX_STYLE,
+    WNDCLASSW, WS_CHILD,
     WS_VISIBLE,
 };
 
@@ -358,6 +359,10 @@ const MAX_CACHED_OUTPUTS: usize = 3;
 
 struct SinkState {
     outputs: Vec<Output>,
+    /// The live keys in the order they were last stacked (highest priority last = topmost). Only
+    /// re-applied when the SET changes: a drag republishes geometry 60 times a second and re-sorting
+    /// the z-order on every one of those would be pure waste.
+    order: Vec<String>,
     /// Kept for the swapchains of outputs created later.
     factory: IDXGIFactory2,
     device: ID3D11Device,
@@ -438,6 +443,7 @@ impl SinkState {
 
             Ok(Self {
                 outputs: Vec::new(),
+                order: Vec::new(),
                 factory,
                 device,
                 context,
@@ -497,6 +503,32 @@ impl SinkState {
                 }
                 o.shown = false;
             }
+        }
+        // Stack them the way the DOM stacks their surfaces (the router publishes highest priority
+        // FIRST, and the widget dock paints above the floating window): walking the list backwards
+        // and sending each to the bottom leaves the first entry lowest. Matters only where two
+        // surfaces overlap — a floating window dragged over the widget dock.
+        let order: Vec<String> = surfaces
+            .iter()
+            .filter(|s| self.outputs.iter().any(|o| o.key == s.key && o.live))
+            .map(|s| s.key.clone())
+            .collect();
+        if order != self.order {
+            for key in order.iter().rev() {
+                let Some(o) = self.outputs.iter().find(|o| &o.key == key) else { continue };
+                unsafe {
+                    let _ = SetWindowPos(
+                        o.hwnd,
+                        Some(HWND_BOTTOM),
+                        0,
+                        0,
+                        0,
+                        0,
+                        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+                    );
+                }
+            }
+            self.order = order;
         }
         while self.outputs.len() > MAX_CACHED_OUTPUTS {
             let Some(i) = self.outputs.iter().position(|o| !o.live) else { break };
@@ -1452,9 +1484,7 @@ unsafe fn create_child(parent_raw: isize, rect: (i32, i32, i32, i32)) -> Result<
             0,
             0,
             0,
-            windows::Win32::UI::WindowsAndMessaging::SWP_NOMOVE
-                | windows::Win32::UI::WindowsAndMessaging::SWP_NOSIZE
-                | SWP_NOACTIVATE,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
         );
         Ok(child)
     }
