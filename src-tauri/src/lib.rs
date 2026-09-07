@@ -97,6 +97,7 @@ use commands::video::{
     video_rtsp_native_sink_surfaces, video_rtsp_native_stats,
     video_linux_hole_spike,
     video_rtsp_native_sink_buffer, video_rtsp_native_sink_orient,
+    video_detached_open, video_detached_close,
 };
 use video::{MediaMtx, MjpegServer};
 use commands::logging::{set_log_level, get_log_path, log_session_settings, log_frontend};
@@ -434,9 +435,13 @@ pub fn run() {
         // Persist everything EXCEPT the decorations flag: we run with a custom titlebar
         // (`decorations: false` in tauri.conf.json), and the state plugin would otherwise
         // restore a previously-saved `decorations: true` and re-add the native title bar.
+        // The detached video window is on the denylist: its box is ours (video prefs), because the
+        // plugin restores a SIZE even when the saved position lands on a monitor that is gone —
+        // which is exactly the case D13 has to survive (VIDEO_MULTISINK_WINDOW.md §5.5).
         builder = builder.plugin(
             tauri_plugin_window_state::Builder::default()
                 .with_state_flags(StateFlags::all() & !StateFlags::DECORATIONS)
+                .with_denylist(&[crate::commands::video::DETACHED_LABEL])
                 .build(),
         );
     }
@@ -772,6 +777,8 @@ pub fn run() {
             video_rtsp_native_sink_buffer,
             video_rtsp_native_sink_orient,
             video_native_mjpeg_stop,
+            video_detached_open,
+            video_detached_close,
             radar_configure,
             radar_set_center,
             radar_set_node_pos,
@@ -821,6 +828,23 @@ pub fn run() {
                 app.state::<std::sync::Arc<MediaMtx>>().stop();
                 app.state::<MjpegServer>().stop();
                 app.state::<video::rtsp_native::NativeRtsp>().stop();
+            }
+            // The detached video window keeps the app alive on its own (Tauri exits when the LAST
+            // window closes), so closing Kite would leave a naked video frame on the desktop. It
+            // goes with the main window — and after it, so the main window's JS is already gone and
+            // its "the user docked the picture back" handler cannot clear the detached pref.
+            if let tauri::RunEvent::WindowEvent {
+                label,
+                event: tauri::WindowEvent::Destroyed,
+                ..
+            } = &event
+            {
+                use tauri::Manager;
+                if label == "main" {
+                    if let Some(win) = app.get_webview_window(commands::video::DETACHED_LABEL) {
+                        let _ = win.destroy();
+                    }
+                }
             }
         });
 }

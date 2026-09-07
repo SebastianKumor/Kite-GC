@@ -123,9 +123,10 @@ impl AndroidVideoSink {
 
     /// The surfaces to present into (VIDEO_MULTISINK_WINDOW.md §4.1). The phone shows the docked
     /// window OR the widget, never both (D10), so this platform stays at ONE output: the first
-    /// entry wins and an empty list hides the view.
+    /// entry wins and an empty list hides the view. There is only ever the main window here — the
+    /// filter keeps the contract identical to the desktop sinks.
     pub fn set_surfaces(&self, surfaces: &[SinkSurface]) {
-        match surfaces.first() {
+        match surfaces.iter().find(|s| s.window == "main") {
             Some(s) => {
                 self.set_rect(s.full.0, s.full.1, s.full.2, s.full.3, s.clip.0, s.clip.1, s.clip.2, s.clip.3);
                 self.set_visible(true);

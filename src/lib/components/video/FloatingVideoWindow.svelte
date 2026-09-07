@@ -42,6 +42,8 @@
     FLOAT_BTN_GAP_PX,
   } from '$lib/stores/video';
   import { canvasSink, mjpegSink } from '$lib/controllers/mjpegSink';
+  import { detachVideo } from '$lib/controllers/detachedVideo';
+  import { isWindows } from '$lib/platform';
   import { nativeSurface, activeNativeSurfaces } from '$lib/controllers/nativeVideo';
   import { doubleTap, mouseDoubleClick } from '$lib/helpers/doubleTap';
   import { beginFloatMove, startFloatMove, startFloatResize } from '$lib/helpers/floatWindowGestures';
@@ -57,11 +59,21 @@
     vh,
   }: { left: number; top: number; width: number; height: number; vw: number; vh: number } = $props();
 
-  /** A source is active (Start pressed): the window may show, the toggle button exists. */
-  const active = $derived($videoState.enabled);
+  /** A source is active (Start pressed): the window may show, the toggle button exists. While the
+   *  picture is in the DETACHED window there is nothing here to show or park (D6), so the frame and
+   *  its toggle button are both gone. */
+  const active = $derived($videoState.enabled && !$videoState.undocked);
   /** The map sits in this frame (swapped) — +page renders it top-level, the body is omitted. */
   const mapHere = $derived($videoState.mapLocation === 'floating');
   const live = $derived($videoState.status === 'live');
+  /** The unplug button: take the picture out of the app into its own window (D3). Native decode
+   *  sink only (D2) — the DOM paths render into THIS WebView and cannot be handed to another one.
+   *  Windows only for now: the macOS/Linux hosts live in the main window, so a second window has
+   *  nowhere to put the picture until they grow one (VIDEO_MULTISINK_WINDOW.md §4.2). */
+  const canDetach = $derived(isWindows && live && $videoState.nativeSink);
+  /** Narrow derived, not a raw store read in the effect below (that would re-run it on every
+   *  telemetry patch): detaching must skip the slide-out — see there. */
+  const detached = $derived($videoState.undocked);
   const open = $derived($videoState.floating && active);
 
   // Mounted lags `open` by one slide (the phone dock's pattern): on close the frame stays in the DOM
@@ -77,7 +89,10 @@
     } else {
       parked = true;
       if (!mounted) return;
-      if (!frameEl) { mounted = false; return; }
+      // Detaching moves the picture, it does not put it away: sliding out here would keep this
+      // frame's surface published for the length of the animation, and the sink serves two
+      // surfaces — the third (the new window's) would be dropped and its hole would stand empty.
+      if (detached || !frameEl) { mounted = false; return; }
       const el = frameEl;
       const done = () => { el.removeEventListener('transitionend', done); if (parked) mounted = false; };
       el.addEventListener('transitionend', done);
@@ -276,6 +291,25 @@
             {/if}
           </div>
         {/if}
+        {#if canDetach}
+          <!-- Hover-only, top-left (D3): the corner the detached window's dock button sits in, so
+               the same corner takes the picture out and brings it back. -->
+          <button
+            class="fw-unplug"
+            onpointerdown={(e) => e.stopPropagation()}
+            onclick={() => detachVideo()}
+            title={$t('video.detach')}
+            aria-label={$t('video.detach')}
+          >
+            <!-- broken chain: two links pulling apart, sparks at the break. Filled, not stroked —
+                 a stroked chain loses the link's hole, which is what makes it read as a chain. -->
+            <svg viewBox="3.3 3.3 17.4 17.4" aria-hidden="true">
+              <path d="M15.69 12.83 19.23 9.29A3.2 3.2 0 0 0 14.71 4.77L11.17 8.31 12.44 9.58 15.98 6.04A1.4 1.4 0 0 1 17.96 8.02L14.42 11.56Z" />
+              <path d="M8.31 11.17 4.77 14.71A3.2 3.2 0 0 0 9.29 19.23L12.83 15.69 11.56 14.42 8.02 17.96A1.4 1.4 0 0 1 6.04 15.98L9.58 12.44Z" />
+              <path d="M7.91 10.67 5.68 9.11 5.19 10.63Z M8.96 8.96 7.69 6.56 6.56 7.69Z M10.67 7.91 10.63 5.19 9.11 5.68Z" />
+            </svg>
+          </button>
+        {/if}
         <VideoReconnectOverlay />
       </div>
     {/if}
@@ -423,6 +457,42 @@
   .fw-body canvas.mirror.rot180 {
     transform: scaleY(-1);
   }
+  /* Unplug: invisible until the pointer is over the frame, then a small overlay button in the
+     picture's top-left corner. */
+  .fw-unplug {
+    position: absolute;
+    top: 8px;
+    left: 8px;
+    z-index: 2;
+    box-sizing: border-box;
+    width: 32px;
+    height: 32px;
+    /* Tight padding, and the glyph's viewBox is cropped to its own bounds — the chain has to stay
+       readable at this size, where a 24-unit box with the usual margin left it too small (Marc). */
+    padding: 4px;
+    background: rgba(46, 46, 46, 0.82);
+    border: 1px solid rgba(55, 168, 219, 0.5);
+    border-radius: 6px;
+    color: #37a8db;
+    cursor: pointer;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.15s ease, background 0.2s;
+  }
+  .fw-body:hover .fw-unplug {
+    opacity: 1;
+    pointer-events: auto;
+  }
+  .fw-unplug:hover {
+    background: rgba(55, 168, 219, 0.3);
+  }
+  .fw-unplug svg {
+    width: 100%;
+    height: 100%;
+    fill: currentColor;
+    stroke: none;
+  }
+
   .fw-ph {
     position: absolute;
     inset: 0;

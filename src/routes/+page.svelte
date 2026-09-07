@@ -98,6 +98,7 @@
   import VideoBackdropMap from "$lib/components/video/VideoBackdropMap.svelte";
   import { LARGE_BASE_VMIN } from "$lib/config/widgetRegistry";
   import FloatingVideoWindow from "$lib/components/video/FloatingVideoWindow.svelte";
+  import { startDetachedVideo, stopDetachedVideo } from "$lib/controllers/detachedVideo";
   import PhoneVideoDock from "$lib/components/phone/PhoneVideoDock.svelte";
   import { setNativeRightBound } from "$lib/controllers/nativeVideo";
   import { doubleTap, mouseDoubleClick } from "$lib/helpers/doubleTap";
@@ -311,7 +312,7 @@
   // snapped window with the button on its right while it is out, the button alone in the corner
   // while it is parked or moved away. Nothing while no source is active (no window, no button).
   const videoReserve = $derived(
-    !$videoState.enabled
+    !$videoState.enabled || $videoState.undocked
       ? 0
       : ($videoState.floating && $videoState.floatSnapped ? floatW + FLOAT_BTN_GAP_PX : 0) +
         FLOAT_MARGIN_PX + FLOAT_BTN_PX + FLOAT_BTN_GAP_PX,
@@ -1156,6 +1157,14 @@
 
   // Auto-start video with the last settings if it was running at last close.
   if (typeof window !== 'undefined') void initVideo();
+
+  // Detached video window (VIDEO_MULTISINK_WINDOW.md PR B): the controller reconciles the second OS
+  // window against `videoState.undocked` — including at launch, so a session that ended detached
+  // comes back detached as soon as the auto-started source is live.
+  onMount(() => {
+    startDetachedVideo();
+    return () => stopDetachedVideo();
+  });
 
   function toggleNavPanel() {
     navPanelOpen = !navPanelOpen;

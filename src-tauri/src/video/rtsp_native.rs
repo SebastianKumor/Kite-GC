@@ -512,6 +512,24 @@ impl NativeRtsp {
         }))
     }
 
+    /// Register `window`'s native handle so surfaces published from it can be hosted
+    /// (VIDEO_MULTISINK_WINDOW.md §5.1). Called when the detached video window is created — before
+    /// its page can publish anything, so its first surface list already resolves to a parent.
+    pub fn register_window(&self, window: &str, parent: isize) {
+        self.parents
+            .lock()
+            .unwrap()
+            .insert(window.to_string(), parent);
+    }
+
+    /// A window is gone: drop its handle and everything it published. Without this a destroyed
+    /// window's holes would keep an output alive over a parent that no longer exists.
+    pub fn forget_window(&self, window: &str) {
+        self.parents.lock().unwrap().remove(window);
+        self.surfaces.lock().unwrap().remove(window);
+        self.push_surfaces();
+    }
+
     /// Replace `window`'s published surfaces (VIDEO_MULTISINK_WINDOW.md §4.1) and hand the sink the
     /// merged list. An empty list means that window shows nothing — visibility is implicit, so
     /// there is no second command that could arrive out of order.
@@ -535,10 +553,18 @@ impl NativeRtsp {
             let merged: Vec<SinkSurface> = {
                 let all = self.surfaces.lock().unwrap();
                 let parents = self.parents.lock().unwrap();
-                all.iter()
-                    .flat_map(|(win, rects)| {
+                // The main window first, then the others by label: a HashMap iterates in an
+                // arbitrary order, and the sink serves the FIRST entries — which window keeps its
+                // picture must not depend on that.
+                let mut windows: Vec<&String> = all.keys().collect();
+                windows.sort_by_key(|w| (w.as_str() != "main", w.as_str()));
+                windows
+                    .into_iter()
+                    .flat_map(|win| {
                         let parent = parents.get(win).copied().unwrap_or(0);
-                        rects.iter().map(move |r| SinkSurface::new(win, parent, r))
+                        all[win]
+                            .iter()
+                            .map(move |r| SinkSurface::new(win, parent, r))
                     })
                     .collect()
             };

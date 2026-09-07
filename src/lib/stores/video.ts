@@ -59,6 +59,18 @@ export interface RtspConnection {
 /** Where the single map instance currently lives (the inverse of which surfaces show video). */
 export type MapLocation = 'main' | 'floating' | 'widget';
 
+/** The detached video window's box, in PHYSICAL px (its own coordinates on the desktop), plus its
+ *  fullscreen state. Ours to persist rather than the window-state plugin's: the plugin restores a
+ *  SIZE even when the saved position lands on a monitor that is gone, which is the one case that
+ *  has to end at a default box on the main window's screen (VIDEO_MULTISINK_WINDOW.md D13). */
+export interface DetachBox {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  fullscreen: boolean;
+}
+
 export interface VideoState {
   /** Active source kind. `camera` → getUserMedia MediaStream; `rtsp` → MediaMTX (WebRTC or MJPEG);
    *  `native` → embedded MJPEG server rendered in an `<img>`. */
@@ -146,6 +158,13 @@ export interface VideoState {
    *  nav rail stay clear of the picture (an empty/hidden panel releases its edge). Off =
    *  the video fills the whole map zone as before. Persisted. */
   unobstructedFullscreen: boolean;
+  /** The picture is in the DETACHED video window — its own OS window, outside the app (D1/D11).
+   *  Mutually exclusive with the in-app floating window: while this is set the floating frame and
+   *  its show/park button are gone, because there is nothing in the app to park. Persisted, so a
+   *  session that ended detached comes back detached. Native decode sink only (D2). */
+  undocked: boolean;
+  /** Last box of the detached window; null until it has been placed once. */
+  detachBox: DetachBox | null;
   /** Where the single map instance currently lives (transient, not persisted). `main` = the normal
    *  full-screen map; `floating`/`widget` = the map jumped into that video surface (which double-
    *  clicked), and every other surface shows video. Double-clicking a video moves the map there. */
@@ -187,6 +206,8 @@ interface VideoPrefs {
   floatY: number;
   floatHeightFrac: number;
   unobstructedFullscreen: boolean;
+  undocked: boolean;
+  detachBox: DetachBox | null;
 }
 
 const PREF_DEFAULTS: VideoPrefs = {
@@ -217,6 +238,8 @@ const PREF_DEFAULTS: VideoPrefs = {
   floatY: 80,
   floatHeightFrac: 0.2,
   unobstructedFullscreen: false,
+  undocked: false,
+  detachBox: null,
 };
 
 function loadPrefs(): VideoPrefs {
@@ -246,6 +269,8 @@ function loadPrefs(): VideoPrefs {
         nativeHeight: p.nativeHeight ?? 720,
         nativeFps: p.nativeFps ?? 30,
         disableHwAccel: p.disableHwAccel ?? false,
+        undocked: p.undocked ?? false,
+        detachBox: p.detachBox ?? null,
       };
     }
   } catch {
@@ -286,6 +311,8 @@ function savePrefs(): void {
         floatY: s.floatY,
         floatHeightFrac: s.floatHeightFrac,
         unobstructedFullscreen: s.unobstructedFullscreen,
+        undocked: s.undocked,
+        detachBox: s.detachBox,
       }),
     );
   } catch {
@@ -343,6 +370,8 @@ const INITIAL: VideoState = {
   floatY: boot.floatY,
   floatHeightFrac: boot.floatHeightFrac,
   unobstructedFullscreen: boot.unobstructedFullscreen,
+  undocked: boot.undocked,
+  detachBox: boot.detachBox,
   mapLocation: 'main',
   widgetRect: null,
 };
@@ -1756,7 +1785,9 @@ export async function setRtspTransport(transport: RtspTransport): Promise<void> 
 /** Toggle the experimental in-process RTSP client (no MediaMTX/ffmpeg; MJPEG sources only for
  *  now); restarts a live RTSP feed so the choice applies immediately. */
 export async function setRtspNativeClient(on: boolean): Promise<void> {
-  patch({ rtspNativeClient: on });
+  // Detaching is a feature of the native client alone (D2) — switching it off brings an open
+  // detached window home instead of leaving a dead frame on the desktop.
+  patch({ rtspNativeClient: on, undocked: on ? get(videoState).undocked : false });
   savePrefs();
   const st = get(videoState);
   if (st.enabled && st.kind === 'rtsp') await startRtsp();
@@ -1977,6 +2008,22 @@ export function setFloatSnapped(floatSnapped: boolean): void {
 /** Free position (px). Snapping is decided by the caller (drag near corner). */
 export function setFloatPos(floatX: number, floatY: number): void {
   patch({ floatX, floatY });
+  savePrefs();
+}
+
+/** Detach / dock the picture (VIDEO_MULTISINK_WINDOW.md D6). The controller reconciles the actual
+ *  OS window against this flag; nothing else creates or destroys it. */
+export function setUndocked(undocked: boolean): void {
+  patch({ undocked });
+  savePrefs();
+}
+
+/** Remember where the detached window is (physical px) — reported by the window itself on every
+ *  move / resize / fullscreen toggle, so the box that comes back next launch is the last one. */
+export function setDetachBox(detachBox: DetachBox): void {
+  const c = get(videoState).detachBox;
+  if (c && c.x === detachBox.x && c.y === detachBox.y && c.w === detachBox.w && c.h === detachBox.h && c.fullscreen === detachBox.fullscreen) return;
+  patch({ detachBox });
   savePrefs();
 }
 

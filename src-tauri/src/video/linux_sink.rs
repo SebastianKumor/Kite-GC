@@ -405,8 +405,12 @@ impl LinuxVideoSink {
     /// The surfaces to present into (VIDEO_MULTISINK_WINDOW.md §4.1). This platform drives ONE
     /// output for now, so the first entry wins — the router publishes them highest-priority first —
     /// and an empty list hides the layer. Two outputs here are the follow-up (§4.2).
+    ///
+    /// Only the MAIN window's surfaces are servable: the GTK host layer lives there, so a surface
+    /// published by the detached video window has nowhere to go here and must not be drawn into the
+    /// main window instead (a second host is the same follow-up).
     pub fn set_surfaces(&self, surfaces: &[SinkSurface]) {
-        match surfaces.first() {
+        match surfaces.iter().find(|s| s.window == "main") {
             Some(s) => {
                 self.set_rect(s.full.0, s.full.1, s.full.2, s.full.3, s.clip.0, s.clip.1, s.clip.2, s.clip.3);
                 self.set_visible(true);

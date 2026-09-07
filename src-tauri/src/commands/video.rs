@@ -388,3 +388,126 @@ pub fn video_linux_hole_spike(on: bool) -> Result<(), String> {
         Err("not available on this build".to_string())
     }
 }
+
+// ── Detached video window (VIDEO_MULTISINK_WINDOW.md PR B) ────────────
+
+/// Label of the detached video window. The surface router in that window publishes its holes under
+/// this label, so the sink can tell them apart from the main window's.
+pub const DETACHED_LABEL: &str = "video";
+
+/// How long `video_detached_open` waits for the window to come up, and in what steps.
+const READY_POLLS: u32 = 60;
+const READY_POLL_MS: u64 = 50;
+
+/// Emitted to the main window when the detached video window is gone — its own close button,
+/// Alt+F4, or our `video_detached_close`. The frontend docks the picture back in (D6).
+pub const DETACHED_CLOSED_EVENT: &str = "video-detached-closed";
+
+/// Spawn the detached video window: a transparent, undecorated, always-on-top window (D4, D8, D12)
+/// running the `/video` route, which draws the same glass frame as the in-app floating window and
+/// registers ONE hole for the native decode sink.
+///
+/// Geometry is ours, not the window-state plugin's (see §5.5 — the plugin restores a size onto a
+/// monitor that may be gone): `x/y` and `w/h` are PHYSICAL px, already validated against the
+/// available monitors by the caller. Opening it twice just focuses the existing window.
+#[tauri::command(async)]
+pub fn video_detached_open(
+    app: AppHandle,
+    x: i32,
+    y: i32,
+    w: u32,
+    h: u32,
+    fullscreen: bool,
+) -> Result<(), String> {
+    use tauri::{Manager, PhysicalPosition, PhysicalSize, WebviewUrl, WebviewWindowBuilder};
+
+    if let Some(win) = app.get_webview_window(DETACHED_LABEL) {
+        let _ = win.set_focus();
+        return Ok(());
+    }
+    // Built hidden: a transparent window flashes its background before the page paints, and the
+    // exact box is applied below in physical px (the builder only takes logical ones).
+    #[allow(unused_mut)]
+    let mut builder = WebviewWindowBuilder::new(&app, DETACHED_LABEL, WebviewUrl::App("video".into()))
+        .title("Kite Ground Control — Video")
+        .decorations(false)
+        .transparent(true)
+        .resizable(true)
+        .always_on_top(true)
+        .visible(false)
+        .inner_size(640.0, 360.0)
+        .min_inner_size(200.0, 120.0);
+    // Every WebView2 in a process shares ONE environment, and asking for a second one with different
+    // browser arguments fails with ERROR_INVALID_STATE (0x8007139F) — the webview is then never
+    // created while the window creation still reports success. The main window sets its own
+    // arguments in tauri.windows.conf.json, so this window has to ask for exactly the same ones;
+    // read from the config rather than repeated here, so the two cannot drift apart.
+    #[cfg(windows)]
+    if let Some(args) = app
+        .config()
+        .app
+        .windows
+        .first()
+        .and_then(|w| w.additional_browser_args.clone())
+    {
+        builder = builder.additional_browser_args(&args);
+    }
+    let win = builder
+        .build()
+        .map_err(|e| format!("detached video window: {e}"))?;
+    // `create_window` hands the event loop a closure and returns: the window is built a moment
+    // later on the main thread, and a failure THERE is only logged, never returned. So wait until
+    // the window answers before reporting success — otherwise a window that was never created looks
+    // exactly like a working one from here (which is how the WebView2 mismatch above stayed hidden).
+    let mut ready = false;
+    for _ in 0..READY_POLLS {
+        if win.is_visible().is_ok() {
+            ready = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(READY_POLL_MS));
+    }
+    if !ready {
+        log::warn!("[video] detached window was not created — see the error above this line");
+        let _ = win.destroy();
+        return Err("the video window could not be created".to_string());
+    }
+    let _ = win.set_position(PhysicalPosition::new(x, y));
+    let _ = win.set_size(PhysicalSize::new(w.max(200), h.max(120)));
+    if fullscreen {
+        let _ = win.set_fullscreen(true);
+    }
+    // The native handle BEFORE the page can publish a surface: the sink drops surfaces from a window
+    // it has no handle for, and a still window publishes nothing again until it moves.
+    #[cfg(target_os = "windows")]
+    match win.hwnd() {
+        Ok(handle) => app
+            .state::<crate::video::rtsp_native::NativeRtsp>()
+            .register_window(DETACHED_LABEL, handle.0 as isize),
+        Err(e) => log::warn!("[video] detached window has no native handle ({e}) — no picture there"),
+    }
+    let app_handle = app.clone();
+    win.on_window_event(move |event| {
+        if matches!(event, tauri::WindowEvent::Destroyed) {
+            app_handle
+                .state::<crate::video::rtsp_native::NativeRtsp>()
+                .forget_window(DETACHED_LABEL);
+            let _ = app_handle.emit_to("main", DETACHED_CLOSED_EVENT, ());
+        }
+    });
+    let _ = win.show();
+    log::info!("[video] detached window opened at {x},{y} {w}x{h} (fullscreen={fullscreen})");
+    Ok(())
+}
+
+/// Close the detached video window if it is open. Idempotent — the picture docks back into the app
+/// when the `video-detached-closed` event lands.
+#[tauri::command(async)]
+pub fn video_detached_close(app: AppHandle) -> Result<(), String> {
+    use tauri::Manager;
+
+    if let Some(win) = app.get_webview_window(DETACHED_LABEL) {
+        win.destroy().map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
