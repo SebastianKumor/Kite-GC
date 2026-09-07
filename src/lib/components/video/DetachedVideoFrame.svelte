@@ -57,6 +57,10 @@
   let fullscreen = $state(false);
   /** The windowed box (physical px) — kept across a fullscreen trip, which must not be saved as it. */
   let box = $state<{ x: number; y: number; w: number; h: number } | null>(null);
+  /** The overlay controls and the resize corner — their rects go to the backend (`pushZones`). */
+  let closeEl = $state<HTMLElement | undefined>(undefined);
+  let fsEl = $state<HTMLElement | undefined>(undefined);
+  let gripEl = $state<HTMLElement | undefined>(undefined);
 
   const live = $derived(feed.status === 'live' && feed.nativeSink);
   const armed = $derived($activeNativeSurfaces.has('floating'));
@@ -71,6 +75,24 @@
   let snapTimer = 0;
   let reportTimer = 0;
 
+  /** Overlay chrome visible? Driven by pointer activity, not by CSS `:hover`: WebKitGTK does not
+   *  reliably deliver a leave event when the pointer leaves the window, so the buttons stayed on
+   *  screen for good (Marc, Linux, 2026-09-08). Movement shows them, [`CHROME_IDLE_MS`] of quiet or
+   *  losing focus hides them again — the way a video player behaves anyway. */
+  let chrome = $state(false);
+  let chromeTimer = 0;
+  const CHROME_IDLE_MS = 1800;
+
+  function wakeChrome(): void {
+    chrome = true;
+    clearTimeout(chromeTimer);
+    chromeTimer = window.setTimeout(() => (chrome = false), CHROME_IDLE_MS);
+  }
+  function sleepChrome(): void {
+    clearTimeout(chromeTimer);
+    chrome = false;
+  }
+
   // A saved box carries the aspect of whatever stream was running when it was saved, and the default
   // box ignores the ring — so the frame is fitted to the picture once the stream's aspect is known,
   // and again whenever it changes (a different source, a resolution switch).
@@ -79,6 +101,12 @@
     if (!aspect || fullscreen) return;
     clearTimeout(snapTimer);
     snapTimer = window.setTimeout(() => void snapAspect(), SNAP_IDLE_MS);
+  });
+
+  // Whenever the page's own hit areas change — the chrome coming and going, fullscreen swallowing
+  // them — the backend needs the new rects. A resize moves them too: see `onGeometryChanged`.
+  $effect(() => {
+    pushZones();
   });
 
   onMount(() => {
@@ -99,9 +127,14 @@
       .catch(() => {});
     void win.onResized(onGeometryChanged).then((u) => offs.push(u));
     void win.onMoved(onGeometryChanged).then((u) => offs.push(u));
+    // Focus gone = pointer gone, as far as the chrome is concerned.
+    void win.onFocusChanged(({ payload }) => {
+      if (!payload) sleepChrome();
+    }).then((u) => offs.push(u));
     return () => {
       clearTimeout(snapTimer);
       clearTimeout(reportTimer);
+      clearTimeout(chromeTimer);
       for (const u of offs) u();
       stopNativeSurfaceRouter();
       document.documentElement.classList.remove('detached-video');
@@ -109,6 +142,7 @@
   });
 
   function onGeometryChanged(): void {
+    pushZones();
     clearTimeout(snapTimer);
     clearTimeout(reportTimer);
     snapTimer = window.setTimeout(() => void snapAspect(), SNAP_IDLE_MS);
@@ -133,6 +167,27 @@
     void emitTo('main', 'video-detached-geometry', { ...box, fullscreen }).catch(() => {});
   }
 
+  /** Hand the backend the shape to hold while the user drags. The OS owns the resize loop, so a
+   *  live aspect lock can only live there (`video_detached_aspect`); this page keeps the last word
+   *  through [`snapAspect`], which now has next to nothing left to correct. Re-sent when the
+   *  stream's aspect changes, on the way in and out of fullscreen (0 releases the window), and
+   *  after every settle — the ring around the picture shifts the WINDOW's own ratio a little, and
+   *  by more the smaller it is. */
+  async function pushAspect(aspect: number): Promise<void> {
+    try {
+      const ring = 2 * RING_PX * (await win.scaleFactor());
+      await invoke('video_detached_aspect', { aspect, ring });
+    } catch {
+      /* the window is going away */
+    }
+  }
+
+  $effect(() => {
+    // Read both synchronously — an effect tracks nothing an await hides.
+    const aspect = fullscreen ? 0 : feed.aspect;
+    void pushAspect(aspect);
+  });
+
   /** Snap the height so the PICTURE (the box inside the ring) carries the stream's aspect exactly —
    *  the same inside-out sizing the in-app frame uses, so neither ever shows bars. */
   async function snapAspect(): Promise<void> {
@@ -140,16 +195,26 @@
     try {
       const size = await win.innerSize();
       const ring = 2 * RING_PX * (await win.scaleFactor());
-      const target = Math.round((size.width - ring) / feed.aspect + ring);
-      if (Math.abs(target - size.height) > 2) {
-        await win.setSize(new PhysicalSize(size.width, Math.max(120, target)));
+      // BOTH axes drive the result — the grip is a corner, so a diagonal pull has to land where
+      // the pointer is. Always deriving the height from the width made the corner feel one-axis:
+      // pulling it down grew the window and the snap pulled it straight back (Marc, 2026-09-08).
+      // The picture keeps whichever side reaches FURTHER, so either direction leads and the other
+      // follows — and no memory of where the drag began is needed.
+      const pic = Math.max(size.width - ring, (size.height - ring) * feed.aspect);
+      const next = { w: Math.round(pic + ring), h: Math.round(pic / feed.aspect + ring) };
+      if (Math.abs(next.w - size.width) > 2 || Math.abs(next.h - size.height) > 2) {
+        await win.setSize(new PhysicalSize(Math.max(200, next.w), Math.max(120, next.h)));
       }
+      void pushAspect(feed.aspect);
     } catch {
       /* the window is going away */
     }
   }
 
+  // Windows and macOS take their window gestures from here. On Linux these never fire: the GTK
+  // press handler has already claimed the press (see `pushZones` and video::linux_drag).
   function onBodyPointerDown(e: PointerEvent): void {
+    wakeChrome();
     if (e.button !== 0 || fullscreen) return;
     void win.startDragging();
   }
@@ -157,6 +222,28 @@
   function onGripPointerDown(e: PointerEvent): void {
     e.stopPropagation();
     void win.startResizeDragging('NorthEast');
+  }
+
+  /** Tell the backend which parts of the window the PAGE handles: its overlay buttons while they
+   *  are on screen, and the resize corner. Linux starts the move and the resize from the GTK press
+   *  handler — the only place the compositor accepts them from — and that handler cannot hit-test
+   *  the DOM, so it is told beforehand. A no-op on Windows and macOS. */
+  function pushZones(): void {
+    const rect = (el: HTMLElement | undefined): [number, number, number, number] | null => {
+      if (!el) return null;
+      const b = el.getBoundingClientRect();
+      return [b.x, b.y, b.width, b.height];
+    };
+    const held: [number, number, number, number][] = [];
+    if (chrome) {
+      for (const el of [closeEl, fsEl]) {
+        const r = rect(el);
+        if (r) held.push(r);
+      }
+    }
+    void invoke('video_detached_chrome', {
+      zones: { drag: !fullscreen, grip: rect(gripEl), chrome: held },
+    }).catch(() => {});
   }
 
   async function toggleFullscreen(): Promise<void> {
@@ -171,6 +258,18 @@
     if (box) void emitTo('main', 'video-detached-geometry', { ...box, fullscreen: next }).catch(() => {});
   }
 
+  /// Ask the app to take the picture back rather than closing this window ourselves. The main
+  /// window stops this window's video first and destroys it afterwards — the other way round the
+  /// renderer loses its widget mid-frame and the whole stream dies with it (Linux, 2026-09-08).
+  async function dockBack(): Promise<void> {
+    // Withdraw this window's surfaces FIRST, from here: the backend then stops this window's own
+    // pipeline while its widgets are still alive, on this command's worker thread — nothing in the
+    // main app waits for it. Only then ask to be taken back.
+    stopNativeSurfaceRouter();
+    await invoke('video_rtsp_native_sink_surfaces', { surfaces: [] }).catch(() => {});
+    void emitTo('main', 'video-detached-dock', {}).catch(() => void win.close());
+  }
+
   function onKey(e: KeyboardEvent): void {
     if (e.key === 'Escape' && fullscreen) void toggleFullscreen();
   }
@@ -178,7 +277,15 @@
 
 <svelte:window onkeydown={onKey} />
 
-<div class="dv-root" class:fs={fullscreen}>
+<!-- svelte-ignore a11y_no_static_element_interactions -->
+<div
+  class="dv-root"
+  class:fs={fullscreen}
+  class:chrome
+  onpointermove={wakeChrome}
+  onpointerenter={wakeChrome}
+  onpointerleave={sleepChrome}
+>
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div
     class="dv-body"
@@ -205,9 +312,10 @@
 
     <!-- Hover chrome (D5): invisible until the pointer is over the frame. -->
     <button
+      bind:this={closeEl}
       class="dv-btn dv-close"
       onpointerdown={(e) => e.stopPropagation()}
-      onclick={() => void win.close()}
+      onclick={() => void dockBack()}
       title={$t('video.detachedClose')}
       aria-label={$t('video.detachedClose')}
     >
@@ -219,6 +327,7 @@
       </svg>
     </button>
     <button
+      bind:this={fsEl}
       class="dv-btn dv-fs"
       onpointerdown={(e) => e.stopPropagation()}
       onclick={() => void toggleFullscreen()}
@@ -239,7 +348,12 @@
 
   {#if !fullscreen}
     <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <div class="dv-grip" onpointerdown={onGripPointerDown} title={$t('video.resizeWindow')}></div>
+    <div
+      bind:this={gripEl}
+      class="dv-grip"
+      onpointerdown={onGripPointerDown}
+      title={$t('video.resizeWindow')}
+    ></div>
   {/if}
 </div>
 
@@ -339,7 +453,7 @@
     transition: opacity 0.15s ease, background 0.2s;
     pointer-events: none;
   }
-  .dv-root:hover .dv-btn {
+  .dv-root.chrome .dv-btn {
     opacity: 1;
     pointer-events: auto;
   }
@@ -373,22 +487,35 @@
     bottom: 8px;
   }
 
-  /* Resize corner — the same L the in-app frame draws in its bezel, a shade lighter than the ring. */
+  /* Resize corner. The hit area is far bigger than the L it draws, and it sits INSIDE the window's
+     own few-pixel resize border: that border is a ONE-AXIS edge resize, handled natively before the
+     page ever sees the press, so a corner drawn on top of it grabbed a single axis whenever the
+     pointer missed the very corner pixel (Marc, 2026-09-08). The easy 44 px square is ours now,
+     both axes at once, and only the outer rim belongs to the window. */
   .dv-grip {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    width: 44px;
+    height: 44px;
+    cursor: nesw-resize;
+    touch-action: none;
+  }
+  /* The visible L — the same corner the in-app floating frame draws (`.fw-grip`), a shade lighter
+     than the ring — in that square's own corner. */
+  .dv-grip::after {
+    content: '';
     position: absolute;
     top: 0;
     right: 0;
     width: 26px;
     height: 26px;
     box-sizing: border-box;
-    background: transparent;
     border-top: 4px solid #5e5e5e;
     border-right: 4px solid #5e5e5e;
     border-top-right-radius: 8px;
-    cursor: nesw-resize;
-    touch-action: none;
   }
-  .dv-grip:hover {
+  .dv-grip:hover::after {
     border-color: #727272;
   }
 </style>

@@ -3369,12 +3369,12 @@
   {#if mapFloating && $videoState.status === 'live' && !phoneUi && $videoState.floating}
     <div class="miniframe-ctl" style={mapFrameStyle}>
       <button class="mf-corner mf-close" style="border-top-left-radius:{5 * uiScale}px;" onclick={() => setMapLocation('main')} title={$t('video.close')}>✕</button>
-      <!-- The window's resize corner, redrawn above the map at the OUTER frame's top-right corner
-           (this layer is unzoomed and sits at the inner box, hence the bezel/scale offsets). -->
+      <!-- The window's resize corner, redrawn above the map just inside the picture's top-right
+           corner (this layer is unzoomed and sits at the inner box, hence the scale offsets). -->
       <!-- svelte-ignore a11y_no_static_element_interactions -->
       <div
         class="mf-corner mf-grip"
-        style="top:{-floatBezel * uiScale}px; right:{-floatBezel * uiScale}px; width:{26 * uiScale}px; height:{26 * uiScale}px; border-width:{floatBezel * uiScale}px; border-top-right-radius:{8 * uiScale}px;"
+        style="top:{3 * uiScale}px; right:{3 * uiScale}px; width:{26 * uiScale}px; height:{26 * uiScale}px; border-width:{floatBezel * uiScale}px; border-top-right-radius:{8 * uiScale}px;"
         onpointerdown={(e) => startFloatResize(e, { left: floatLeft, top: floatTop, width: floatW, height: floatH, vw: logicalW, vh: logicalH })}
         title={$t('video.resizeWindow')}
       ></div>
