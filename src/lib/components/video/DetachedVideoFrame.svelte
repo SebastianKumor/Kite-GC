@@ -23,6 +23,7 @@
   import { t } from 'svelte-i18n';
   import { getCurrentWindow, PhysicalSize } from '@tauri-apps/api/window';
   import { emitTo, listen, type UnlistenFn } from '@tauri-apps/api/event';
+  import { invoke } from '@tauri-apps/api/core';
   import {
     nativeSurface,
     activeNativeSurfaces,
@@ -163,6 +164,9 @@
     if (next) await readBox(); // keep the windowed box; fullscreen must not overwrite it
     fullscreen = next;
     await win.setFullscreen(next);
+    // macOS drops the window's level on the way out of fullscreen (see video_detached_pin_top),
+    // so the always-on-top promise has to be renewed on every toggle.
+    void invoke('video_detached_pin_top').catch(() => {});
     if (!next) await readBox(); // back in a window — that box is the truth again
     if (box) void emitTo('main', 'video-detached-geometry', { ...box, fullscreen: next }).catch(() => {});
   }
