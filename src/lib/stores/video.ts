@@ -1709,15 +1709,23 @@ export function stopVideo(): void {
   savePrefs();
 }
 
+/** Whether a Video widget sits in a dock (the phone grid included) — +page keeps this current.
+ *  A widget already shows the picture, so Start leaves the floating window parked then. */
+let videoWidgetActive = false;
+export function setVideoWidgetActive(active: boolean): void {
+  videoWidgetActive = active;
+}
+
 export function toggleVideo(): void {
   if (get(videoState).enabled) {
     stopVideo();
     return;
   }
-  // Starting a source brings the floating window (the docked window on the phone) back on screen
-  // — the panel has no preview, so this is where the picture appears. Parking it afterwards is the
-  // toggle's job, and the source runs on while it is parked.
-  patch({ floating: true });
+  // Starting a source brings the floating window (the docked window on the phone) on screen —
+  // the panel has no preview, so this is where the picture appears — unless a Video widget is
+  // active: then the widget is the picture and the window starts parked (Marc, 2026-09-08). The
+  // toggle button shows / parks it afterwards, and the source runs on while it is parked.
+  patch({ floating: !videoWidgetActive });
   savePrefs();
   void startActive();
 }

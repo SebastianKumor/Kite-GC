@@ -102,7 +102,7 @@
   import { setNativeRightBound } from "$lib/controllers/nativeVideo";
   import { doubleTap, mouseDoubleClick } from "$lib/helpers/doubleTap";
   import { startFloatResize } from "$lib/helpers/floatWindowGestures";
-  import { initVideo, videoState, videoStream, bindVideoEl, setMapLocation, registerPiPElement, reportMjpegError, floatFrameRect, FLOAT_BEZEL_PX, FLOAT_MARGIN_PX, FLOAT_BTN_PX, FLOAT_BTN_GAP_PX } from "$lib/stores/video";
+  import { initVideo, videoState, videoStream, bindVideoEl, setMapLocation, registerPiPElement, reportMjpegError, setVideoWidgetActive, floatFrameRect, FLOAT_BEZEL_PX, FLOAT_MARGIN_PX, FLOAT_BTN_PX, FLOAT_BTN_GAP_PX } from "$lib/stores/video";
   import { canvasSink, mjpegSink } from "$lib/controllers/mjpegSink";
   import { nativeSurface, activeNativeSurface } from "$lib/controllers/nativeVideo";
   import { lowPowerActive } from "$lib/stores/lowPower";
@@ -2641,6 +2641,15 @@
   function patchPhoneWidgets(next: PhoneWidgetsConfig) {
     if (next !== $settings.phoneWidgets) settings.patch({ phoneWidgets: next });
   }
+  // The video store learns whether a Video widget is on screen (dock or phone grid): Start then
+  // leaves the floating window parked — the widget is the picture.
+  $effect(() => {
+    setVideoWidgetActive(
+      phoneUi
+        ? phoneCtrl.isPhoneWidgetActive(phoneWidgets, 'videoFeed')
+        : panels.bottom.includes('videoFeed') || panels.right.includes('videoFeed'),
+    );
+  });
 
   function toggleWidget(widgetId: string) {
     if (phoneUi) {
