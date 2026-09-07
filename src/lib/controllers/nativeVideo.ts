@@ -385,7 +385,9 @@ function tick(): void {
       });
     }
   }
-  applyClips(disjoint(holes));
+  // Topmost surface first (DOM stacking is the reverse of the priority order): the one that owns
+  // the shared pixels keeps its hole whole, the ones below it are trimmed around it.
+  applyClips(disjoint([...holes].reverse()));
   if (import.meta.env.DEV) {
     const prev = get(nativeHoleDebug);
     const same =
@@ -409,7 +411,12 @@ const OUTER_MARGIN_PX = 24;
  *  reappeared exactly where a floating window covered the widget tile (Marc, 2026-09-08). Nothing
  *  about the fill rule fixes that (even-odd has the same parity problem), so the holes are made
  *  disjoint first: every hole is cut down to the parts no earlier hole already covers. The union is
- *  unchanged, which is all the sink cares about — the topmost native layer owns the shared pixels. */
+ *  unchanged, which is all the sink cares about — the topmost native layer owns the shared pixels.
+ *
+ *  Order matters beyond that: the caller passes the TOPMOST surface first, so the hole that survives
+ *  the overlap intact is the one whose layer is actually on top. `holesFor` then has a whole hole to
+ *  cut the surfaces below out of — trimming it here would leave exactly the overlap uncut, which is
+ *  where their bezels were showing through. */
 function disjoint(holes: Hole[]): Hole[] {
   if (holes.length < 2) return holes;
   const out: Hole[] = [];
