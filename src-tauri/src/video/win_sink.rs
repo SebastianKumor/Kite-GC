@@ -70,7 +70,7 @@ use windows::Win32::Media::MediaFoundation::{
 use windows::Win32::System::Com::{CoInitializeEx, CoTaskMemFree, COINIT_MULTITHREADED};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, PeekMessageW,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, IsWindow, PeekMessageW,
     RegisterClassW, SetWindowPos, ShowWindow, TranslateMessage, HWND_BOTTOM, MSG, PM_REMOVE,
     SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_SHOWNA, WINDOW_EX_STYLE,
     WNDCLASSW, WS_CHILD,
@@ -333,6 +333,12 @@ struct HevcSeq {
 struct Output {
     /// `window/id` of the surface this output serves.
     key: String,
+    /// The native window this output's child window hangs under. A surface can come back under a
+    /// DIFFERENT one — the detached video window is destroyed on docking and rebuilt on the next
+    /// detach — and Windows destroys a child with its parent, so the cached output would then be a
+    /// child window that no longer exists: nothing to see, and the first blit into its swapchain
+    /// fails the whole sink (which is what ended the stream). Compared before an output is reused.
+    parent: isize,
     hwnd: HWND,
     swapchain: IDXGISwapChain1,
     /// Video processor, cached per (in_w, in_h, out_w, out_h).
@@ -477,15 +483,37 @@ impl SinkState {
             if s.parent == 0 {
                 continue; // that window has no native handle registered — never guess one
             }
-            let idx = match self.outputs.iter().position(|o| o.key == s.key) {
+            // A cached output is only reusable while its child window is still alive under the same
+            // parent (see `Output::parent`); otherwise it is thrown away and built again.
+            let cached = self
+                .outputs
+                .iter()
+                .position(|o| o.key == s.key)
+                .filter(|&i| {
+                    self.outputs[i].parent == s.parent
+                        && unsafe { IsWindow(Some(self.outputs[i].hwnd)) }.as_bool()
+                });
+            let idx = match cached {
                 Some(i) => i,
-                None => match unsafe { self.create_output(s) } {
-                    Ok(i) => i,
-                    Err(e) => {
-                        log::warn!("[video] sink: no output for surface {}: {e}", s.key);
-                        continue;
+                None => {
+                    if let Some(i) = self.outputs.iter().position(|o| o.key == s.key) {
+                        let stale = self.outputs.remove(i);
+                        unsafe {
+                            let _ = DestroyWindow(stale.hwnd);
+                        }
+                        log::info!(
+                            "[video] sink: surface {} is in another window now — output rebuilt",
+                            s.key
+                        );
                     }
-                },
+                    match unsafe { self.create_output(s) } {
+                        Ok(i) => i,
+                        Err(e) => {
+                            log::warn!("[video] sink: no output for surface {}: {e}", s.key);
+                            continue;
+                        }
+                    }
+                }
             };
             unsafe { self.place_output(idx, s) };
             self.outputs[idx].live = true;
@@ -565,6 +593,7 @@ impl SinkState {
             log::info!("[video] sink: output for surface {} created", s.key);
             self.outputs.push(Output {
                 key: s.key.clone(),
+                parent: s.parent,
                 hwnd,
                 swapchain,
                 vp: None,

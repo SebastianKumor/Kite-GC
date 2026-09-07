@@ -36,6 +36,20 @@ below. The release you are reading the docs for is expanded; click an older vers
         Linux and macOS — lower latency, a fraction of the CPU load, and rock-solid reconnects.
         [#85] · [#88] · [#89] · [#126]
 
+    ??? info "Video in two places at once — and on a screen of its own"
+        With Kite's own RTSP client the picture now runs in the **Video widget and a large surface at
+        the same time** — the floating window or the fullscreen swap — the way the other sources
+        always did. One decode feeds both. [#129]
+
+        **And it can leave the app.** Hover the floating window and a **broken-chain button** appears
+        in its top-left corner: the frame moves out into its own window, **always on top**, framed
+        exactly like the one inside Kite. Put it beside the app or on a **second monitor, which then
+        becomes your video screen** — Kite fills it again by itself at the next start, in the same
+        place and, if you left it that way, in fullscreen. The detached window has no title bar: the
+        buttons appear when the pointer is over it — top-left brings the picture home, bottom-right
+        goes fullscreen. Drag the picture to move it, the top-right corner resizes it, and the frame
+        keeps the stream's aspect ratio. Windows for now. [#130]
+
     ??? info "Telemetry API — live telemetry for other programs"
         Kite can now **serve its live telemetry as JSON** to anything that can read it: an NDJSON
         stream over TCP (port 27300), an HTTP snapshot (port 27301) and UDP subscribers (send `subscribe`, get
@@ -105,6 +119,13 @@ below. The release you are reading the docs for is expanded; click an older vers
       the link, the recording and the track running while Kite is minimised. [#111]
     - **High-Resolution 3D** — the globe at native pixel density (sharp on phones, tablets and
       high-DPI screens) or at half resolution for weak GPUs; Settings → Interface → Map. [#111]
+    - **Detached video window** — the floating video frame moves out of the app into its own
+      always-on-top window: put it beside Kite or on a second monitor, which then becomes your video
+      screen and is filled automatically at start. An **unplug button** appears on the floating
+      window when you hover it; the detached window's own hover buttons bring the picture back
+      (top-left) and switch to fullscreen (bottom-right). Where it stands — including fullscreen —
+      is remembered; if that screen is gone next time, it opens on Kite's own. Needs the Native RTSP
+      client, Windows for now. [#130]
     - **The video shows in two places at once** — with Kite's own RTSP client the picture now runs
       in the Video widget **and** the floating window (or the fullscreen swap) at the same time,
       as it always did with the other sources. One decode feeds both. [#129]
@@ -118,7 +139,7 @@ below. The release you are reading the docs for is expanded; click an older vers
 
     - **Video window (detach)** — the old detached window was the browser's Picture-in-Picture: it
       never worked with Kite's own RTSP client and only ever existed on Windows. A real detached
-      video window, on every desktop system, replaces it. [#129]
+      video window replaces it. [#129]
 
     **Improved**
 
@@ -174,3 +195,4 @@ below. The release you are reading the docs for is expanded; click an older vers
 [#126]: https://github.com/b14ckyy/Kite-GC/pull/126
 [#127]: https://github.com/b14ckyy/Kite-GC/pull/127
 [#129]: https://github.com/b14ckyy/Kite-GC/pull/129
+[#130]: https://github.com/b14ckyy/Kite-GC/pull/130
