@@ -113,6 +113,22 @@ below. The release you are reading the docs for is expanded; click an older vers
       width. [#102]
     - **Android launcher icon** fills its circle instead of floating small in it. [#102]
     - **3D mission markers** match the 2D marker size and are sharp on high-DPI screens. [#111]
+    - **Fly Here works on INAV over MAVLink.** INAV's MAVLink port accepts a guided target only in
+      the absolute-altitude frame and refused Kite's, so "Fly Here" came back "not supported by this
+      firmware". Kite now retries in the frame INAV wants, with the altitude converted from the
+      aircraft's own telemetry. Nothing changes for ArduPilot, which accepts the first attempt. Note
+      that INAV itself requires POSHOLD, the GCS NAV switch and a GPS fix before it will accept a
+      guided target at all, and it takes no mode or arm command over MAVLink.
+    - **MAVLink is the default protocol** on every platform, not just on iPad: the usual ground
+      station is a telemetry radio, which is MAVLink over serial. The network port now follows the
+      protocol too (MAVLink UDP 14550 or TCP 5760, MSP TCP 5761), and a port you typed yourself is
+      left alone. Picking MSP still works exactly as before.
+    - **"Fly Here" opens with the aircraft's own loiter radius** on fixed wing instead of an empty
+      field, which read as "no radius" while the vehicle would in fact use its configured one. The
+      radius stepper is no longer clipped by the edge of the popup.
+    - **HDOP is correct on INAV.** The GPS tile read the position-error field instead, because the
+      first field of INAV's GPS statistics message is 16 bits and Kite decoded it as 32.
+
     - **Raspberry Pi 5 HEVC** — the native RTSP client no longer aborts on streams whose picture is
       padded to the encoder's block size (NVENC 720p, every 1080p): the padding is decoded zero-copy
       and hidden under the interface. Start-up no longer drops the frames right after the keyframe,
