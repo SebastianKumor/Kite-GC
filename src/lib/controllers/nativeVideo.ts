@@ -109,12 +109,68 @@ export function nativeSurface(el: HTMLElement, id: NativeSurfaceId): { destroy()
   };
 }
 
+// ── Arming ───────────────────────────────────────────────────────────────────────────────────
+// The native layer is a separate compositor surface: the DOM paints its new position in the very
+// frame it is asked to, the layer follows an IPC hop and a window move later. Standing still that is
+// invisible — but a hole that opens before the layer has arrived shows the page behind it, which is
+// how a stream coming back (start, unpark, a panel scrolling into view) used to flash.
+//
+// So the layer is ARMED before any hole is cut: rect and show are sent first, and only once the
+// backend has taken both does a surface go transparent. The picture is then already there when the
+// transparency arrives; at worst it is briefly covered by the opaque DOM, which nobody sees.
+/** False while the sink is hidden or still moving into place — the DOM must stay opaque. */
+let armed = true;
+let armPending = false;
+
+/** Bumped whenever the sink is taken away again — an arming round that started before that
+ *  must not report success and open a hole over a hidden layer. */
+let armGen = 0;
+
+/** Position the layer and show it; the DOM opens its hole only once both have landed. */
+function armSurface(phys: Record<string, number>): void {
+  if (armPending) return;
+  armPending = true;
+  const gen = armGen;
+  lastRectKey = rectKey(phys);
+  lastVisible = true;
+  Promise.all([
+    invoke('video_rtsp_native_sink_rect', phys),
+    invoke('video_rtsp_native_sink_visible', { visible: true }),
+  ])
+    .catch(() => {})
+    .finally(() => {
+      armPending = false;
+      if (gen === armGen) armed = true;
+    });
+}
+
+function rectKey(p: Record<string, number>): string {
+  return `${p.x},${p.y},${p.w},${p.h},${p.cx},${p.cy},${p.cw},${p.ch}`;
+}
+
+/** Hide the layer and take every hole back (no surface on screen). */
+function hideSink(): void {
+  if (lastVisible !== false) {
+    lastVisible = false;
+    sendVisible(false);
+  }
+  if (get(activeNativeSurface) !== null) activeNativeSurface.set(null);
+  if (armed || armPending) armGen++;
+  armed = false;
+  clearClips();
+  lastRectKey = '';
+}
+
 /** Start following surfaces (call when the sink route reports live). Idempotent. */
 export function startNativeSurfaceRouter(): void {
   if (running || typeof window === 'undefined') return;
   running = true;
   lastRectKey = '';
   lastVisible = null;
+  // The first appearance takes the same route as the return from a gesture: place the layer,
+  // show it, and only then let a surface cut its hole.
+  armed = false;
+  armPending = false;
   raf = requestAnimationFrame(tick);
 }
 
@@ -214,6 +270,49 @@ function visibleRect(el: HTMLElement, rect: DOMRect, id: NativeSurfaceId): DOMRe
 /** Dev diagnostics: which ancestor produced each clipped edge in the last visibleRect. */
 let lastClipBy = '';
 
+// Rect / visibility are pushed over IPC, which is a QUEUE: a drag produces a new rect every
+// animation frame, and anything that cannot keep up (the WebView's message pump, the backend's
+// sink thread) turns that stream into a growing backlog — the layer then trails the DOM by the
+// whole queue instead of by a frame. So only ever ONE call of each kind is in flight; while it
+// is, the newest value is remembered and sent when it settles. Older values are simply dropped:
+// nobody wants a position the window has already left.
+let rectInFlight = false;
+let pendingRect: Record<string, number> | null = null;
+let visibleInFlight = false;
+let pendingVisible: boolean | null = null;
+
+function sendRect(phys: Record<string, number>): void {
+  if (rectInFlight) {
+    pendingRect = phys;
+    return;
+  }
+  rectInFlight = true;
+  void invoke('video_rtsp_native_sink_rect', phys)
+    .catch(() => {})
+    .finally(() => {
+      rectInFlight = false;
+      const next = pendingRect;
+      pendingRect = null;
+      if (next) sendRect(next);
+    });
+}
+
+function sendVisible(visible: boolean): void {
+  if (visibleInFlight) {
+    pendingVisible = visible;
+    return;
+  }
+  visibleInFlight = true;
+  void invoke('video_rtsp_native_sink_visible', { visible })
+    .catch(() => {})
+    .finally(() => {
+      visibleInFlight = false;
+      const next = pendingVisible;
+      pendingVisible = null;
+      if (next !== null && next !== visible) sendVisible(next);
+    });
+}
+
 /** Viewport-x (css px) beyond which no surface is visible — the phone's widget column edge; null
  *  = no bound. Set by +page (it owns the column width and its replay-player slide). */
 let rightBound: number | null = null;
@@ -237,16 +336,13 @@ function coverBox(el: HTMLElement, rect: DOMRect): DOMRect {
 function tick(): void {
   if (!running) return;
   const c = chosen();
-  if (get(activeNativeSurface) !== (c?.id ?? null)) activeNativeSurface.set(c?.id ?? null);
   const vis = c ? visibleRect(c.el, c.rect, c.id) : null;
+  if (armed && get(activeNativeSurface) !== (c && vis ? c.id : null)) {
+    activeNativeSurface.set(c && vis ? c.id : null);
+  }
   if (!c || !vis) {
     // No surface — or the active one is scrolled entirely out of its container.
-    if (lastVisible !== false) {
-      lastVisible = false;
-      void invoke('video_rtsp_native_sink_visible', { visible: false }).catch(() => {});
-    }
-    clearClips();
-    lastRectKey = '';
+    hideSink();
     if (import.meta.env.DEV) nativeHoleDebug.set(null); // no hole → no stale readout
   } else {
     // Two rects go to the sink: the surface's FULL box for video layout (aspect fit), and
@@ -269,14 +365,22 @@ function tick(): void {
       cw: Math.round(hole.width * dpr),
       ch: Math.round(hole.height * dpr),
     };
+    if (!armed) {
+      // The layer is hidden (stream just came up, surface scrolled back in): move it into place
+      // and show it, and leave the DOM opaque until the backend has both. Nothing else this pass —
+      // the clips below would cut a hole the layer is not behind yet.
+      armSurface(phys);
+      raf = requestAnimationFrame(tick);
+      return;
+    }
     if (lastVisible !== true) {
       lastVisible = true;
-      void invoke('video_rtsp_native_sink_visible', { visible: true }).catch(() => {});
+      sendVisible(true);
     }
-    const key = `${phys.x},${phys.y},${phys.w},${phys.h},${phys.cx},${phys.cy},${phys.cw},${phys.ch}`;
+    const key = rectKey(phys);
     if (key !== lastRectKey) {
       lastRectKey = key;
-      void invoke('video_rtsp_native_sink_rect', phys).catch(() => {});
+      sendRect(phys);
     }
     // Clip with the rect the NATIVE layer actually got (device-pixel-snapped): a hole a
     // fraction wider than the native layer exposes a hairline of whatever is behind it.

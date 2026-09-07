@@ -85,17 +85,6 @@ pub enum SinkCodec {
 enum Cmd {
     /// One Annex-B access unit + its (unwrapped) RTP timestamp in 90 kHz ticks.
     Frame(Vec<u8>, u64),
-    /// `full` = the surface's whole box (video layout / aspect fit), `clip` = the visible
-    /// part after scroll-container clipping — the window sits at `clip` and the picture is
-    /// shifted + source-cropped so it gets CUT at the container edge, never shrunk.
-    Rect { full: (i32, i32, i32, i32), clip: (i32, i32, i32, i32) },
-    Visible(bool),
-    /// Smoothing-buffer depth in frames (0 = present on decode, the latency-first
-    /// default). See `SinkState::pump_queue`.
-    Buffer(u32),
-    /// Horizontal mirror / 180° rotation, pre-combined into the two flip axes the video
-    /// processor takes (mirror = flip-H; rotate180 = flip-H+flip-V; both = flip-V).
-    Orient { flip_h: bool, flip_v: bool },
     Stop,
 }
 
@@ -106,6 +95,46 @@ struct Shared {
     size: Mutex<Option<(u32, u32)>>,
     error: Mutex<Option<String>>,
     stopped: AtomicBool,
+    /// Geometry / visibility / orientation, LATEST WINS — deliberately NOT on the frame
+    /// channel. The sink thread handles one channel message per loop pass and each pass
+    /// presents (vsync-paced, ~16 ms), so ~60 control messages a second — what a window drag
+    /// produces — queued up behind the frames and drained at frame rate: the layer trailed
+    /// the DOM by the whole backlog, and a park/unpark landed a second or two late (Marc,
+    /// 2026-09-08). Here a burst collapses to its newest value, applied once per pass.
+    ctrl: Mutex<Ctrl>,
+    ctrl_dirty: AtomicBool,
+}
+
+/// Pending control state (`None` = unchanged since the thread last applied it).
+#[derive(Default)]
+struct Ctrl {
+    /// `full` = the surface's whole box (video layout / aspect fit), `clip` = the visible
+    /// part after scroll-container clipping — the window sits at `clip` and the picture is
+    /// shifted + source-cropped so it gets CUT at the container edge, never shrunk.
+    rect: Option<((i32, i32, i32, i32), (i32, i32, i32, i32))>,
+    visible: Option<bool>,
+    /// Smoothing-buffer depth in frames (0 = present on decode, the latency-first
+    /// default). See `SinkState::pump_queue`.
+    buffer: Option<u32>,
+    /// Horizontal mirror / 180° rotation, pre-combined into the two flip axes the video
+    /// processor takes (mirror = flip-H; rotate180 = flip-H+flip-V; both = flip-V).
+    orient: Option<(bool, bool)>,
+}
+
+impl Shared {
+    /// Queue a control change for the sink thread (latest wins).
+    fn ctrl(&self, f: impl FnOnce(&mut Ctrl)) {
+        f(&mut self.ctrl.lock().unwrap());
+        self.ctrl_dirty.store(true, Ordering::Release);
+    }
+
+    /// Everything queued since the last call, or `None` when nothing changed.
+    fn take_ctrl(&self) -> Option<Ctrl> {
+        if !self.ctrl_dirty.swap(false, Ordering::Acquire) {
+            return None;
+        }
+        Some(std::mem::take(&mut *self.ctrl.lock().unwrap()))
+    }
 }
 
 /// Handle to the sink thread. Dropping stops it.
@@ -149,22 +178,22 @@ impl WinVideoSink {
     /// Full box `x/y/w/h` for the video layout, visible part `cx/cy/cw/ch` for the clip.
     #[allow(clippy::too_many_arguments)]
     pub fn set_rect(&self, x: i32, y: i32, w: i32, h: i32, cx: i32, cy: i32, cw: i32, ch: i32) {
-        let _ = self.tx.send(Cmd::Rect { full: (x, y, w, h), clip: (cx, cy, cw, ch) });
+        self.shared.ctrl(|c| c.rect = Some(((x, y, w, h), (cx, cy, cw, ch))));
     }
 
     pub fn set_visible(&self, visible: bool) {
-        let _ = self.tx.send(Cmd::Visible(visible));
+        self.shared.ctrl(|c| c.visible = Some(visible));
     }
 
     /// Smoothing-buffer depth in frames (0 = present on decode). Capped small — the DXVA
     /// decoder's surface pool is finite and held frames come out of it.
     pub fn set_buffer(&self, frames: u32) {
-        let _ = self.tx.send(Cmd::Buffer(frames.min(3)));
+        self.shared.ctrl(|c| c.buffer = Some(frames.min(3)));
     }
 
     /// Horizontal mirror / 180° rotation of the presented picture.
     pub fn set_orient(&self, mirror: bool, rotate180: bool) {
-        let _ = self.tx.send(Cmd::Orient { flip_h: mirror != rotate180, flip_v: rotate180 });
+        self.shared.ctrl(|c| c.orient = Some((mirror != rotate180, rotate180)));
     }
 
     pub fn frames_presented(&self) -> u64 {
@@ -234,12 +263,37 @@ fn run_sink(
     };
 
     loop {
+        // `stop()` flips this before its channel message, which would otherwise wait out a
+        // frame backlog.
+        if shared.stopped.load(Ordering::Acquire) {
+            break;
+        }
         // Pump the child window's messages (it lives on this thread).
         unsafe {
             let mut msg = MSG::default();
             while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
                 let _ = TranslateMessage(&msg);
                 DispatchMessageW(&msg);
+            }
+        }
+        // Geometry / visibility FIRST and off the frame channel: the newest values win, so a
+        // drag's 60 rect updates a second cost one SetWindowPos per pass instead of queueing
+        // behind the frames (see `Shared::ctrl`). The layer then lands within a pass of the
+        // DOM hole, and show/hide is immediate.
+        if let Some(c) = shared.take_ctrl() {
+            if let Some((full, clip)) = c.rect {
+                unsafe { state.set_rect(full, clip) };
+            }
+            if let Some(v) = c.visible {
+                unsafe {
+                    let _ = ShowWindow(state.hwnd, if v { SW_SHOWNA } else { SW_HIDE });
+                }
+            }
+            if let Some(frames) = c.buffer {
+                state.buffer_frames = frames as usize;
+            }
+            if let Some((flip_h, flip_v)) = c.orient {
+                unsafe { state.set_orient(flip_h, flip_v) };
             }
         }
         match rx.recv_timeout(Duration::from_millis(5)) {
@@ -252,12 +306,6 @@ fn run_sink(
                     *shared.error.lock().unwrap() = Some(e);
                 }
             }
-            Ok(Cmd::Rect { full, clip }) => unsafe { state.set_rect(full, clip) },
-            Ok(Cmd::Visible(v)) => unsafe {
-                let _ = ShowWindow(state.hwnd, if v { SW_SHOWNA } else { SW_HIDE });
-            },
-            Ok(Cmd::Buffer(frames)) => state.buffer_frames = frames as usize,
-            Ok(Cmd::Orient { flip_h, flip_v }) => unsafe { state.set_orient(flip_h, flip_v) },
             Ok(Cmd::Stop) | Err(RecvTimeoutError::Disconnected) => break,
             Err(RecvTimeoutError::Timeout) => {}
         }
