@@ -309,33 +309,22 @@ pub fn video_rtsp_native_start(
     }
 }
 
-/// Push the on-screen video rect (PHYSICAL px, main-window client coords) to the native
-/// decode sink: `x/y/w/h` is the surface's FULL box (video layout / aspect fit),
-/// `cx/cy/cw/ch` the VISIBLE part after scroll-container clipping — the sink cuts the
-/// video at that edge instead of shrinking it. Cheap; no-op while no sink runs.
+/// Publish the calling window's video surfaces to the native decode sink: every DOM hole it wants
+/// the picture in, with the surface's FULL box `x/y/w/h` (the video's aspect-fit layout) and its
+/// VISIBLE box `cx/cy/cw/ch` (what is left after the DOM's clipping ancestors — the sink CUTS the
+/// picture there instead of shrinking it). All in PHYSICAL px of that window's client area.
+///
+/// The list REPLACES what this window published before, so visibility is implicit: a surface that
+/// stops being listed is gone, and an empty list means this window shows nothing. Tauri hands us
+/// the calling window, so a second window (the detached video window) can never overwrite the main
+/// window's holes. Cheap; a no-op while no sink runs.
 #[tauri::command]
-#[allow(clippy::too_many_arguments)]
-pub fn video_rtsp_native_sink_rect(
-    x: i32,
-    y: i32,
-    w: i32,
-    h: i32,
-    cx: i32,
-    cy: i32,
-    cw: i32,
-    ch: i32,
+pub fn video_rtsp_native_sink_surfaces(
+    surfaces: Vec<crate::video::surface::SurfaceRect>,
+    window: tauri::Window,
     native_rtsp: State<'_, crate::video::rtsp_native::NativeRtsp>,
 ) {
-    native_rtsp.sink_rect(x, y, w, h, cx, cy, cw, ch);
-}
-
-/// Show/hide the native decode sink's layer (no DOM surface displays the video right now).
-#[tauri::command]
-pub fn video_rtsp_native_sink_visible(
-    visible: bool,
-    native_rtsp: State<'_, crate::video::rtsp_native::NativeRtsp>,
-) {
-    native_rtsp.sink_visible(visible);
+    native_rtsp.sink_surfaces(window.label(), surfaces);
 }
 
 /// Smoothing-buffer depth for the native decode sink (frames, 0 = present on decode —

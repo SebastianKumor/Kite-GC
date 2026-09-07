@@ -102,9 +102,9 @@
   import { setNativeRightBound } from "$lib/controllers/nativeVideo";
   import { doubleTap, mouseDoubleClick } from "$lib/helpers/doubleTap";
   import { startFloatResize } from "$lib/helpers/floatWindowGestures";
-  import { initVideo, videoState, videoStream, bindVideoEl, setMapLocation, registerPiPElement, reportMjpegError, setVideoWidgetActive, floatFrameRect, FLOAT_BEZEL_PX, FLOAT_MARGIN_PX, FLOAT_BTN_PX, FLOAT_BTN_GAP_PX } from "$lib/stores/video";
+  import { initVideo, videoState, videoStream, bindVideoEl, setMapLocation, reportMjpegError, setVideoWidgetActive, floatFrameRect, FLOAT_BEZEL_PX, FLOAT_MARGIN_PX, FLOAT_BTN_PX, FLOAT_BTN_GAP_PX } from "$lib/stores/video";
   import { canvasSink, mjpegSink } from "$lib/controllers/mjpegSink";
-  import { nativeSurface, activeNativeSurface } from "$lib/controllers/nativeVideo";
+  import { nativeSurface, activeNativeSurfaces } from "$lib/controllers/nativeVideo";
   import { lowPowerActive } from "$lib/stores/lowPower";
   import { initPulseBlink } from "$lib/stores/pulseBlink";
   import { openUrl } from "@tauri-apps/plugin-opener";
@@ -262,14 +262,6 @@
   let mapVideoEl = $state<HTMLVideoElement | null>(null);
   $effect(() => {
     bindVideoEl(mapVideoEl, $videoStream);
-  });
-
-  // Persistent (always-mounted) source element for native Picture-in-Picture, so
-  // the PiP window survives closing the Video panel. Hidden but rendered/playing.
-  let pipVideoEl = $state<HTMLVideoElement | null>(null);
-  $effect(() => {
-    bindVideoEl(pipVideoEl, $videoStream);
-    if (pipVideoEl) registerPiPElement(pipVideoEl);
   });
 
   // Global UI scale (1 = 100%, up to 2). Zooms the chrome via `.ui-scale`; the map
@@ -3482,7 +3474,7 @@
          it scales to the window (full height/width) without distortion — bars where aspect differs. -->
     <div
       class="map-video-wrap"
-      class:nv-active={$activeNativeSurface === 'main'}
+      class:nv-active={$activeNativeSurfaces.has('main')}
       class:unobstructed={ufActive}
       bind:clientWidth={ufWrapW}
       bind:clientHeight={ufWrapH}
@@ -3506,12 +3498,12 @@
         <!-- svelte-ignore a11y_no_static_element_interactions -->
         <div
           class="native-hole"
-          class:armed={$activeNativeSurface === 'main'}
+          class:armed={$activeNativeSurfaces.has('main')}
           use:nativeSurface={'main'}
           ondblclick={mouseDoubleClick(() => setMapLocation('main'))}
           use:doubleTap={() => setMapLocation('main')}
         >
-          {#if $activeNativeSurface !== 'main'}<span>{$t('video.sinkElsewhere')}</span>{/if}
+          {#if !$activeNativeSurfaces.has('main')}<span>{$t('video.sinkElsewhere')}</span>{/if}
         </div>
       {:else if $videoState.mjpegUrl}
         <!-- Native / MJPEG feed (no MediaStream): drawn by the off-thread reader where the WebView
@@ -3634,10 +3626,6 @@
       />
     </div>
   </div>
-
-  <!-- Persistent hidden source for native Picture-in-Picture (survives panel close) -->
-  <!-- svelte-ignore a11y_media_has_caption -->
-  <video bind:this={pipVideoEl} class="pip-source" autoplay muted playsinline></video>
 
   <!-- ======= FLOATING VIDEO WINDOW (+ its show/hide toggle) ======= -->
   <FloatingVideoWindow left={floatLeft} top={floatTop} width={floatW} height={floatH} vw={logicalW} vh={logicalH} />
@@ -4317,19 +4305,6 @@
   .map-video.mirror.rot180 {
     transform: scaleY(-1);
   }
-  /* PiP source: rendered + playing but visually out of the way (must not be
-     display:none, or it produces no frames for Picture-in-Picture). */
-  .pip-source {
-    position: absolute;
-    left: 0;
-    bottom: 0;
-    width: 1px;
-    height: 1px;
-    opacity: 0;
-    pointer-events: none;
-    z-index: -1;
-  }
-
   .zone-bottom-dock {
     grid-area: bottom-dock;
     z-index: 100;

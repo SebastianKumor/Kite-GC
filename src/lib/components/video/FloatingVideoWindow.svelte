@@ -42,7 +42,7 @@
     FLOAT_BTN_GAP_PX,
   } from '$lib/stores/video';
   import { canvasSink, mjpegSink } from '$lib/controllers/mjpegSink';
-  import { nativeSurface, activeNativeSurface } from '$lib/controllers/nativeVideo';
+  import { nativeSurface, activeNativeSurfaces } from '$lib/controllers/nativeVideo';
   import { doubleTap, mouseDoubleClick } from '$lib/helpers/doubleTap';
   import { beginFloatMove, startFloatMove, startFloatResize } from '$lib/helpers/floatWindowGestures';
   import VideoReconnectOverlay from '$lib/components/video/VideoReconnectOverlay.svelte';
@@ -225,15 +225,26 @@
     style="left:{left}px; top:{top}px; width:{width}px; height:{height}px;"
   >
     <!-- glass bezel (behind) — the video / map sits in its inner box -->
-    <div class="fw-frame" class:nv-active={$activeNativeSurface === 'floating'}></div>
+    <!-- The bezel keeps its border and its drop shadow while the hardware layer is armed, so it is
+         a clip target too — that outline was what still crossed the widget's picture. -->
+    <div
+      class="fw-frame"
+      class:nv-active={$activeNativeSurfaces.has('floating')}
+      data-nv-clip={$activeNativeSurfaces.has('floating') ? 'floating' : undefined}
+    ></div>
 
     <!-- content: the video. When the map is in this frame, it's rendered (top-level) by +page here
-         instead, and the body is omitted. Double-click the video → the map jumps into this frame. -->
+         instead, and the body is omitted. Double-click the video → the map jumps into this frame.
+         `data-nv-clip="floating"` while it holds the hardware layer: the opaque bezel this box
+         paints (its border + the ring around it) sits BEHIND the widget tile, whose own hole is
+         transparent — so the bezel showed through the tile's picture wherever the two overlap. The
+         router cuts it away with the holes of the surfaces above this one, never with its own. -->
     {#if !mapHere}
       <!-- svelte-ignore a11y_no_static_element_interactions -->
       <div
         class="fw-body"
-        class:nv-active={$activeNativeSurface === 'floating'}
+        class:nv-active={$activeNativeSurfaces.has('floating')}
+        data-nv-clip={$activeNativeSurfaces.has('floating') ? 'floating' : undefined}
         onpointerdown={onBodyPointerDown}
         ondblclick={mouseDoubleClick(() => setMapLocation('floating'))}
         use:doubleTap={() => setMapLocation('floating')}
@@ -241,8 +252,8 @@
         {#if live && $videoState.nativeSink}
           <!-- Native decode sink (hole punch): the video is a hardware layer BELOW the WebView;
                this div is the transparent hole it shows through. See controllers/nativeVideo. -->
-          <div class="native-hole" class:armed={$activeNativeSurface === 'floating'} use:nativeSurface={'floating'}>
-            {#if $activeNativeSurface !== 'floating'}<span>{$t('video.sinkElsewhere')}</span>{/if}
+          <div class="native-hole" class:armed={$activeNativeSurfaces.has('floating')} use:nativeSurface={'floating'}>
+            {#if !$activeNativeSurfaces.has('floating')}<span>{$t('video.sinkElsewhere')}</span>{/if}
           </div>
         {:else if live && $videoState.mjpegUrl}
           <!-- Native / MJPEG feed (no MediaStream): drawn by the off-thread reader where the WebView

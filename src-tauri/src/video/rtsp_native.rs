@@ -20,6 +20,7 @@
 
 use std::io::Read;
 use std::net::TcpListener;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
@@ -28,6 +29,7 @@ use std::time::{Duration, Instant};
 
 use super::mjpeg_server::{accept_loop, broadcast_loop, Client, EndedHook};
 use super::rtsp::{run_rtsp, LiveRtspStats, RtspConfig, RtspTransport, VideoCodec};
+use super::surface::{SinkSurface, SurfaceRect};
 #[cfg(target_os = "android")]
 use super::android_sink::AndroidVideoSink;
 #[cfg(target_os = "windows")]
@@ -139,6 +141,13 @@ pub struct NativeRtsp {
     sink_codec: Arc<Mutex<Option<&'static str>>>,
     /// Live counters of the running stream (fresh per start) — the Debug Monitor's feed.
     live: Mutex<Option<Arc<LiveRtspStats>>>,
+    /// What each window's surface router last published, keyed by window label. The sink always
+    /// gets the MERGED list, so one window's push can never drop another window's holes
+    /// (VIDEO_MULTISINK_WINDOW.md §4.1).
+    surfaces: Mutex<HashMap<String, Vec<SurfaceRect>>>,
+    /// Native parent window handle per window label — Windows parents its child surface windows to
+    /// it. Seeded with the main window at `start`; the detached video window registers its own.
+    parents: Mutex<HashMap<String, isize>>,
 }
 
 struct Running {
@@ -181,6 +190,10 @@ impl NativeRtsp {
         parent_hwnd: Option<isize>,
     ) -> Result<Started, String> {
         self.stop();
+        // The main window hosts every surface until the detached video window registers itself.
+        if let Some(h) = parent_hwnd {
+            self.parents.lock().unwrap().insert("main".to_string(), h);
+        }
 
         let listener = TcpListener::bind("127.0.0.1:0").map_err(|e| format!("bind: {e}"))?;
         listener
@@ -296,12 +309,16 @@ impl NativeRtsp {
                             };
                             #[cfg(target_os = "windows")]
                             let started_sink = {
-                                let Some(parent) = parent_hwnd else { return };
+                                // Each surface brings the window it is parented to, so the sink
+                                // needs no handle here — only the route's presence check.
+                                if parent_hwnd.is_none() {
+                                    return;
+                                }
                                 let sink_codec = match frame.codec {
                                     VideoCodec::H265 => SinkCodec::H265,
                                     _ => SinkCodec::H264,
                                 };
-                                WinVideoSink::start(parent, (0, 0, 1, 1), sink_codec)
+                                WinVideoSink::start(sink_codec)
                             };
                             #[cfg(target_os = "android")]
                             let started_sink = AndroidVideoSink::start(frame.codec);
@@ -424,6 +441,9 @@ impl NativeRtsp {
             .lock()
             .unwrap()
             .replace(Running { stop, shutdown, rtsp, broadcast, accept });
+        // The sink was created mid-stream by the RTSP thread and knows nothing about the surfaces
+        // the routers published before that — hand it the current list instead of waiting a frame.
+        self.push_surfaces();
         Ok(started)
     }
 
@@ -492,29 +512,40 @@ impl NativeRtsp {
         }))
     }
 
-    /// Forward the on-screen video rect (PHYSICAL px, main-window client coords) to the
-    /// active decode sink: full box `x/y/w/h` for the video layout, visible part
-    /// `cx/cy/cw/ch` after scroll-container clipping — both sinks lay the video out in
-    /// the full box and CUT it at the visible edge (a scrolled panel crops the picture,
-    /// it never shrinks it). No-op without a sink (MJPEG route, other OS, stopped).
-    #[allow(clippy::too_many_arguments)]
-    pub fn sink_rect(&self, x: i32, y: i32, w: i32, h: i32, cx: i32, cy: i32, cw: i32, ch: i32) {
-        #[cfg(any(target_os = "windows", target_os = "android", target_os = "linux", target_os = "macos"))]
-        if let Some(s) = self.sink.lock().unwrap().as_ref() {
-            s.set_rect(x, y, w, h, cx, cy, cw, ch);
+    /// Replace `window`'s published surfaces (VIDEO_MULTISINK_WINDOW.md §4.1) and hand the sink the
+    /// merged list. An empty list means that window shows nothing — visibility is implicit, so
+    /// there is no second command that could arrive out of order.
+    pub fn sink_surfaces(&self, window: &str, rects: Vec<SurfaceRect>) {
+        {
+            let mut all = self.surfaces.lock().unwrap();
+            if rects.is_empty() {
+                all.remove(window);
+            } else {
+                all.insert(window.to_string(), rects);
+            }
         }
-        #[cfg(not(any(target_os = "windows", target_os = "android", target_os = "linux", target_os = "macos")))]
-        let _ = (x, y, w, h, cx, cy, cw, ch);
+        self.push_surfaces();
     }
 
-    /// Show/hide the decode sink's native layer (no DOM surface wants it right now).
-    pub fn sink_visible(&self, visible: bool) {
+    /// Resolve every published surface against its window and hand the list to the active sink.
+    /// Surfaces whose window has no native handle yet are dropped rather than guessed.
+    fn push_surfaces(&self) {
         #[cfg(any(target_os = "windows", target_os = "android", target_os = "linux", target_os = "macos"))]
-        if let Some(s) = self.sink.lock().unwrap().as_ref() {
-            s.set_visible(visible);
+        {
+            let merged: Vec<SinkSurface> = {
+                let all = self.surfaces.lock().unwrap();
+                let parents = self.parents.lock().unwrap();
+                all.iter()
+                    .flat_map(|(win, rects)| {
+                        let parent = parents.get(win).copied().unwrap_or(0);
+                        rects.iter().map(move |r| SinkSurface::new(win, parent, r))
+                    })
+                    .collect()
+            };
+            if let Some(s) = self.sink.lock().unwrap().as_ref() {
+                s.set_surfaces(&merged);
+            }
         }
-        #[cfg(not(any(target_os = "windows", target_os = "android", target_os = "linux", target_os = "macos")))]
-        let _ = visible;
     }
 
     /// Smoothing-buffer depth for the decode sink (frames, 0 = present on decode).
@@ -681,7 +712,20 @@ mod tests {
             matches!(started, Started::Sink { .. }),
             "expected the H264 decode-sink route for this source"
         );
-        server.sink_rect(40, 40, 640, 400, 40, 40, 640, 400);
+        server.sink_surfaces(
+            "main",
+            vec![SurfaceRect {
+                id: "main".into(),
+                x: 40,
+                y: 40,
+                w: 640,
+                h: 400,
+                cx: 40,
+                cy: 40,
+                cw: 640,
+                ch: 400,
+            }],
+        );
         std::thread::sleep(Duration::from_secs(6));
         let (presented, size, err) = server.sink_stats().expect("sink stats");
         eprintln!("presented={presented} size={size:?} err={err:?}");

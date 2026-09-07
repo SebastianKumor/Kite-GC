@@ -1054,9 +1054,9 @@
       {#if !$videoRtcStats && !$mjpegStats && !$nativeRtspStats}
         <div class="perf-empty">{$t('debug.vidInactive')}</div>
       {/if}
-      {#if import.meta.env.DEV && $nativeHoleDebug}
-        {@const hd = $nativeHoleDebug}
+      {#if import.meta.env.DEV && $nativeHoleDebug.length > 0}
         <div class="debug-stats stats-rows">
+          {#each $nativeHoleDebug as hd (hd.id)}
           <div class="stat-group">
             <span class="stat-label">{$t('debug.vidHole')}</span>
             <span class="stat-value">{hd.id}</span>
@@ -1073,6 +1073,7 @@
             <span class="stat-label">by</span>
             <span class="stat-value">{hd.by}</span>
           </div>
+          {/each}
         </div>
       {/if}
       {#if import.meta.env.DEV && isLinux}

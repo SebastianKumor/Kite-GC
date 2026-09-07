@@ -51,6 +51,7 @@ use gst::prelude::*;
 
 use super::linux_host;
 use super::rtsp::{strip_window, SpsProbe, VideoCodec, Window};
+use super::surface::SinkSurface;
 
 /// The host places the widget one main-thread hop away; the GL sink needs it there before
 /// it starts (its GL context comes from the realized GtkGLArea).
@@ -401,10 +402,23 @@ impl LinuxVideoSink {
         self.shared.error.lock().unwrap().clone()
     }
 
+    /// The surfaces to present into (VIDEO_MULTISINK_WINDOW.md §4.1). This platform drives ONE
+    /// output for now, so the first entry wins — the router publishes them highest-priority first —
+    /// and an empty list hides the layer. Two outputs here are the follow-up (§4.2).
+    pub fn set_surfaces(&self, surfaces: &[SinkSurface]) {
+        match surfaces.first() {
+            Some(s) => {
+                self.set_rect(s.full.0, s.full.1, s.full.2, s.full.3, s.clip.0, s.clip.1, s.clip.2, s.clip.3);
+                self.set_visible(true);
+            }
+            None => self.set_visible(false),
+        }
+    }
+
     /// On-screen video rect (PHYSICAL px, window coords): FULL box + VISIBLE box — the
     /// host lays the widget out in the full box and clips it at the visible edge.
     #[allow(clippy::too_many_arguments)]
-    pub fn set_rect(&self, x: i32, y: i32, w: i32, h: i32, cx: i32, cy: i32, cw: i32, ch: i32) {
+    fn set_rect(&self, x: i32, y: i32, w: i32, h: i32, cx: i32, cy: i32, cw: i32, ch: i32) {
         self.geom.lock().unwrap().rect = Some([x, y, w, h, cx, cy, cw, ch]);
         self.apply_rect();
     }
@@ -443,7 +457,7 @@ impl LinuxVideoSink {
         );
     }
 
-    pub fn set_visible(&self, visible: bool) {
+    fn set_visible(&self, visible: bool) {
         linux_host::set_visible(visible);
     }
 
@@ -545,12 +559,29 @@ fn bus_loop(bus: &gst::Bus, shared: &Shared) {
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
     use crate::video::rtsp_native::{NativeRtsp, Started};
+
     use gtk::glib;
     use gtk::prelude::*;
     use std::sync::atomic::AtomicBool;
     use std::time::Instant;
+
+    /// The one surface these end-to-end tests publish — the router's payload for a 640×360 hole.
+    fn test_surface() -> crate::video::surface::SurfaceRect {
+        crate::video::surface::SurfaceRect {
+            id: "main".into(),
+            x: 20,
+            y: 20,
+            w: 640,
+            h: 360,
+            cx: 20,
+            cy: 20,
+            cw: 640,
+            ch: 360,
+        }
+    }
 
     /// Start/stop cycles of the real sink under a real GtkWindow (needs a display and a
     /// running H264/HEVC source, e.g. tools/rtsp_test_server.py --codec h264):
@@ -583,8 +614,7 @@ mod tests {
                     let started = server.start(Arc::new(|| {}), &url, "auto", None).expect("start");
                     assert!(matches!(started, Started::Sink { .. }), "expected the sink route");
                     eprintln!("cycle {cycle}: started in {:?}", t.elapsed());
-                    server.sink_rect(20, 20, 640, 360, 20, 20, 640, 360);
-                    server.sink_visible(true);
+                    server.sink_surfaces("main", vec![test_surface()]);
                     std::thread::sleep(Duration::from_secs(3));
                     let (presented, size, err) = server.sink_stats().expect("sink stats");
                     eprintln!("cycle {cycle}: presented={presented} size={size:?} err={err:?}");
@@ -679,15 +709,14 @@ mod tests {
                     let started = server.start(Arc::new(|| {}), u, "auto", None).expect("start");
                     let Started::Sink { codec } = started else { panic!("expected the sink route") };
                     eprintln!("cycle {cycle}: {codec} started in {:?}", t.elapsed());
-                    server.sink_rect(20, 20, 640, 360, 20, 20, 640, 360);
-                    server.sink_visible(true);
+                    server.sink_surfaces("main", vec![test_surface()]);
                     std::thread::sleep(Duration::from_secs(3));
                     let (presented, size, err) = server.sink_stats().expect("sink stats");
                     eprintln!("cycle {cycle}: presented={presented} size={size:?} err={err:?}");
                     assert!(err.is_none(), "sink error: {err:?}");
                     assert!(presented > 30, "expected >30 presented frames, got {presented}");
-                    // Frontend order on stop: the router hides the layer, then the stream stops.
-                    server.sink_visible(false);
+                    // Frontend order on stop: the router drops the surface, then the stream stops.
+                    server.sink_surfaces("main", vec![]);
                     std::thread::sleep(Duration::from_millis(100));
                     let t = Instant::now();
                     server.stop();
