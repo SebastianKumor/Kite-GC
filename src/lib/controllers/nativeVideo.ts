@@ -382,7 +382,7 @@ function tick(): void {
       });
     }
   }
-  applyClips(holes);
+  applyClips(disjoint(holes));
   if (import.meta.env.DEV) {
     const prev = get(nativeHoleDebug);
     const same =
@@ -396,6 +396,62 @@ function tick(): void {
   raf = requestAnimationFrame(tick);
 }
 
+
+/** Two holes that OVERLAP would cancel each other out: the outer ring winds one way, each hole the
+ *  other, so a point inside both counts +1 −1 −1 and the nonzero fill rule paints it again — the map
+ *  reappeared exactly where a floating window covered the widget tile (Marc, 2026-09-08). Nothing
+ *  about the fill rule fixes that (even-odd has the same parity problem), so the holes are made
+ *  disjoint first: every hole is cut down to the parts no earlier hole already covers. The union is
+ *  unchanged, which is all the sink cares about — the topmost native layer owns the shared pixels. */
+function disjoint(holes: Hole[]): Hole[] {
+  if (holes.length < 2) return holes;
+  const out: Hole[] = [];
+  for (const h of holes) {
+    let pieces = [h];
+    for (const done of out) pieces = pieces.flatMap((p) => subtractHole(p, done.rect));
+    out.push(...pieces);
+  }
+  return out;
+}
+
+/** The parts of `a` outside `b` — up to four bands, each keeping only the corner radii it still owns
+ *  (a cut edge is square, the surviving outer corners stay rounded). */
+function subtractHole(a: Hole, b: DOMRect): Hole[] {
+  const r = a.rect;
+  const ix1 = Math.max(r.left, b.left);
+  const iy1 = Math.max(r.top, b.top);
+  const ix2 = Math.min(r.right, b.right);
+  const iy2 = Math.min(r.bottom, b.bottom);
+  if (ix2 <= ix1 || iy2 <= iy1) return [a]; // no overlap
+  const out: Hole[] = [];
+  const band = (x1: number, y1: number, x2: number, y2: number) => {
+    if (x2 - x1 < 0.5 || y2 - y1 < 0.5) return; // sub-pixel slivers cut nothing
+    out.push({ rect: new DOMRect(x1, y1, x2 - x1, y2 - y1), radii: keptCorners(a, x1, y1, x2, y2) });
+  };
+  const midTop = Math.max(r.top, iy1);
+  const midBottom = Math.min(r.bottom, iy2);
+  band(r.left, r.top, r.right, iy1); // above
+  band(r.left, iy2, r.right, r.bottom); // below
+  band(r.left, midTop, ix1, midBottom); // left of the overlap
+  band(ix2, midTop, r.right, midBottom); // right of it
+  return out;
+}
+
+/** Which of `a`'s rounded corners the piece (x1,y1)-(x2,y2) still has; the rest go square. */
+function keptCorners(a: Hole, x1: number, y1: number, x2: number, y2: number): HoleRadii {
+  const EPS = 0.5;
+  const r = a.rect;
+  const l = Math.abs(x1 - r.left) < EPS;
+  const t = Math.abs(y1 - r.top) < EPS;
+  const ri = Math.abs(x2 - r.right) < EPS;
+  const b = Math.abs(y2 - r.bottom) < EPS;
+  return {
+    tl: l && t ? a.radii.tl : 0,
+    tr: ri && t ? a.radii.tr : 0,
+    bl: l && b ? a.radii.bl : 0,
+    br: ri && b ? a.radii.br : 0,
+  };
+}
 
 /** Per-corner rounding of the hole, viewport px (0 = square corner). */
 export interface HoleRadii {
