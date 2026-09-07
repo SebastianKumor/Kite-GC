@@ -833,6 +833,8 @@ pub fn run() {
             // window closes), so closing Kite would leave a naked video frame on the desktop. It
             // goes with the main window — and after it, so the main window's JS is already gone and
             // its "the user docked the picture back" handler cannot clear the detached pref.
+            // Desktop only: there is no second window on mobile, and `destroy` does not exist there.
+            #[cfg(desktop)]
             if let tauri::RunEvent::WindowEvent {
                 label,
                 event: tauri::WindowEvent::Destroyed,

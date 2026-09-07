@@ -512,6 +512,7 @@ impl NativeRtsp {
         }))
     }
 
+    #[cfg(desktop)]
     /// Register `window`'s native handle so surfaces published from it can be hosted
     /// (VIDEO_MULTISINK_WINDOW.md §5.1). Called when the detached video window is created — before
     /// its page can publish anything, so its first surface list already resolves to a parent.
@@ -522,6 +523,7 @@ impl NativeRtsp {
             .insert(window.to_string(), parent);
     }
 
+    #[cfg(desktop)]
     /// A window is gone: drop its handle and everything it published. Without this a destroyed
     /// window's holes would keep an output alive over a parent that no longer exists.
     pub fn forget_window(&self, window: &str) {
