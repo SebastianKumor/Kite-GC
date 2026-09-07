@@ -21,6 +21,9 @@ pub mod rtsp_native;
 pub mod surface;
 /// Windows H264/HEVC decode + render sink for the hole-punch surface (MOBILE_RTSP.md P2.1).
 #[cfg(target_os = "windows")]
+pub mod win_aspect;
+
+#[cfg(target_os = "windows")]
 pub mod win_sink;
 /// Android H264/HEVC MediaCodec sink for the same hole-punch surface (MOBILE_RTSP.md P2.2).
 #[cfg(target_os = "android")]

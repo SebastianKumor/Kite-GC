@@ -167,6 +167,27 @@
     void emitTo('main', 'video-detached-geometry', { ...box, fullscreen }).catch(() => {});
   }
 
+  /** Hand the backend the shape to hold while the user drags. The OS owns the resize loop, so a
+   *  live aspect lock can only live there (`video_detached_aspect`); this page keeps the last word
+   *  through [`snapAspect`], which now has next to nothing left to correct. Re-sent when the
+   *  stream's aspect changes, on the way in and out of fullscreen (0 releases the window), and
+   *  after every settle — the ring around the picture shifts the WINDOW's own ratio a little, and
+   *  by more the smaller it is. */
+  async function pushAspect(aspect: number): Promise<void> {
+    try {
+      const ring = 2 * RING_PX * (await win.scaleFactor());
+      await invoke('video_detached_aspect', { aspect, ring });
+    } catch {
+      /* the window is going away */
+    }
+  }
+
+  $effect(() => {
+    // Read both synchronously — an effect tracks nothing an await hides.
+    const aspect = fullscreen ? 0 : feed.aspect;
+    void pushAspect(aspect);
+  });
+
   /** Snap the height so the PICTURE (the box inside the ring) carries the stream's aspect exactly —
    *  the same inside-out sizing the in-app frame uses, so neither ever shows bars. */
   async function snapAspect(): Promise<void> {
@@ -184,6 +205,7 @@
       if (Math.abs(next.w - size.width) > 2 || Math.abs(next.h - size.height) > 2) {
         await win.setSize(new PhysicalSize(Math.max(200, next.w), Math.max(120, next.h)));
       }
+      void pushAspect(feed.aspect);
     } catch {
       /* the window is going away */
     }

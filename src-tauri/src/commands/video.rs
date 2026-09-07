@@ -490,9 +490,13 @@ pub fn video_detached_open(
         // it has no handle for, and a still window publishes nothing again until it moves.
         #[cfg(target_os = "windows")]
         match win.hwnd() {
-            Ok(handle) => app
-                .state::<crate::video::rtsp_native::NativeRtsp>()
-                .register_window(DETACHED_LABEL, handle.0 as isize),
+            Ok(handle) => {
+                app.state::<crate::video::rtsp_native::NativeRtsp>()
+                    .register_window(DETACHED_LABEL, handle.0 as isize);
+                // The same handle carries the aspect lock (`video_detached_aspect`): it holds the
+                // shape from inside the OS resize loop, where the page cannot reach.
+                crate::video::win_aspect::install(handle.0 as isize);
+            }
             Err(e) => log::warn!("[video] detached window has no native handle ({e}) — no picture there"),
         }
         // Linux: the detached window needs a video layer tree of its own. A GStreamer sink's widget
@@ -593,8 +597,36 @@ pub fn video_detached_chrome(zones: DetachedChrome) {
     let _ = zones;
 }
 
-/// The page's layout, as [`video_detached_chrome`] takes it.
+/// Hold the detached window to the picture's shape while the user drags its corner. The page can
+/// only put the size right AFTER a drag — inside the OS's resize loop every correction it makes is
+/// overwritten by the next mouse move, which is what made the frame snap into shape when the
+/// pointer stopped. Each platform enforces it where its resize actually happens: a `WM_SIZING`
+/// subclass on Windows, GTK's geometry hints on Linux, AppKit's content aspect ratio on macOS.
+///
+/// `aspect` is the picture's width/height and `ring` the page's chrome around it in physical px;
+/// `aspect <= 0` releases the window, which is what fullscreen wants.
+#[tauri::command]
+pub fn video_detached_aspect(app: AppHandle, aspect: f64, ring: f64) {
+    #[cfg(target_os = "windows")]
+    {
+        let _ = &app;
+        crate::video::win_aspect::set_shape(aspect, ring);
+    }
+    #[cfg(target_os = "linux")]
+    crate::video::linux_drag::set_aspect(&app, DETACHED_LABEL, aspect, ring);
+    #[cfg(target_os = "macos")]
+    {
+        let _ = &app;
+        crate::video::apple_host::set_aspect(DETACHED_LABEL.to_string(), aspect, ring);
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
+    let _ = (app, aspect, ring);
+}
+
+/// The page's layout, as [`video_detached_chrome`] takes it. Only Linux reads the rects — the other
+/// platforms take their window gestures from the page itself and never need to know.
 #[derive(serde::Deserialize)]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub struct DetachedChrome {
     /// Dragging the picture moves the window (false while fullscreen).
     pub drag: bool,

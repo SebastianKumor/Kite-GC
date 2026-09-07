@@ -23,6 +23,7 @@ use std::sync::Mutex;
 use gtk::gdk;
 use gtk::glib;
 use gtk::prelude::*;
+use tauri::{AppHandle, Manager};
 
 /// What the page handles itself, and where the resize corner is (CSS px, `[x, y, w, h]`).
 #[derive(Clone, Default)]
@@ -40,6 +41,42 @@ pub fn set_zones(drag: bool, grip: Option<[f64; 4]>, chrome: Vec<[f64; 4]>) {
     if let Ok(mut z) = ZONES.lock() {
         *z = Zones { drag, grip, chrome };
     }
+}
+
+/// Hold the window to the picture's shape while it is resized. GTK constrains the size it accepts
+/// from the compositor, so this works inside the drag rather than after it — the page's own snap
+/// (`DetachedVideoFrame`) stays the authority for the exact size and has nothing left to do while
+/// this holds. `ring` is the page's chrome in physical px; `aspect <= 0` releases the window
+/// (fullscreen, where a constraint would fight the screen's own size).
+pub fn set_aspect(app: &AppHandle, label: &str, aspect: f64, ring: f64) {
+    // The window is looked up ON the GTK thread: GTK objects are not `Send`, so only the handle and
+    // the label may cross (the same shape `linux_host::install_for` uses).
+    let app = app.clone();
+    let label = label.to_string();
+    glib::MainContext::default().invoke(move || {
+        let Some(window) = app.get_webview_window(&label) else { return };
+        let Ok(gtk_window) = window.gtk_window() else { return };
+        if aspect <= 0.0 {
+            gtk_window.set_geometry_hints(None::<&gtk::Widget>, None, gdk::WindowHints::empty());
+            return;
+        }
+        let border = (ring / f64::from(gtk_window.scale_factor().max(1))).round() as i32;
+        let geometry = gdk::Geometry::new(
+            -1, -1, -1, -1, // no size limits of our own: tauri set the minimum
+            border,
+            border,
+            -1,
+            -1,
+            aspect,
+            aspect,
+            gdk::Gravity::NorthWest,
+        );
+        gtk_window.set_geometry_hints(
+            None::<&gtk::Widget>,
+            Some(&geometry),
+            gdk::WindowHints::ASPECT | gdk::WindowHints::BASE_SIZE,
+        );
+    });
 }
 
 fn hit(r: &[f64; 4], x: f64, y: f64) -> bool {

@@ -276,6 +276,35 @@ pub fn float_window(label: String) {
     });
 }
 
+/// Hold `label`'s window to the picture's shape while the user resizes it. AppKit enforces a
+/// content aspect ratio inside its own resize loop, which is the only place it can be enforced
+/// without fighting the drag.
+///
+/// The ratio is the WINDOW's, not the picture's: the page's chrome (`ring`, physical px) is a fixed
+/// border around the picture, so it shifts the ratio slightly, and by more the smaller the window
+/// is. It is therefore worked out from the window's size at the time — the page re-sends the shape
+/// whenever a resize settles, so the ratio it is held to is always the one it currently has. What
+/// remains is a pixel or two at the far end of a long drag, which the page's own snap takes care
+/// of. `aspect <= 0` releases the window (fullscreen).
+pub fn set_aspect(label: String, aspect: f64, ring: f64) {
+    on_main(move |_| {
+        let Some(app) = APP.get() else { return };
+        let Some(window) = app.get_webview_window(&label) else { return };
+        let Ok(ptr) = window.ns_window() else { return };
+        // SAFETY: tauri hands out the live NSWindow of this window.
+        let Some(ns_window) = (unsafe { Retained::retain(ptr.cast::<NSWindow>()) }) else { return };
+        if aspect <= 0.0 {
+            ns_window.setContentAspectRatio(CGSize::new(0.0, 0.0));
+            return;
+        }
+        let size = ns_window.contentView().map(|v| v.frame().size).unwrap_or(CGSize::new(0.0, 0.0));
+        let scale = ns_window.backingScaleFactor().max(1.0);
+        let border = ring / scale; // the ring arrives in physical px, AppKit works in points
+        let picture = (size.width - border).max(160.0);
+        ns_window.setContentAspectRatio(CGSize::new(picture + border, picture / aspect + border));
+    });
+}
+
 /// Stack the containers the way the DOM stacks their surfaces. `keys` arrives highest-priority
 /// FIRST (`main` > `floating` > `widget`), and DOM stacking is the reverse of that — the widget dock
 /// paints over the floating window, which paints over the fullscreen swap. So the list is walked
