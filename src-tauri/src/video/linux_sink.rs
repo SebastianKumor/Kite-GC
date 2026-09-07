@@ -5,13 +5,31 @@
 //! `win_sink` (Media Foundation) and `android_sink` (MediaCodec). H.264/HEVC access units
 //! from the RTSP client go into
 //!
-//!   appsrc → h264parse/h265parse → decodebin3 → tee
-//!                                                  ├→ queue → valve → [leg] → gtkglsink   (slot 0)
-//!                                                  └→ queue → valve → [leg] → gtkglsink   (slot 1)
-//!   leg = glupload → glcolorconvert → glvideoflip
+//!   appsrc → h264parse/h265parse → decodebin3 → glupload → glcolorconvert → tee
+//!                            ├→ queue → valve → glvideoflip → gtkglsink                  (slot 0)
+//!                            └→ queue → valve → glvideoflip → gldownload → videoconvert → gtksink
+//!
+//! The tee sits BEHIND the GL upload on purpose. In front of it, one GL branch and one CPU branch
+//! have to agree on a buffer type, and the only thing both accept is system memory — the VA decoder
+//! then stops handing out DMABuf and every frame is copied through RAM and uploaded again. Measured
+//! on the Debian 13 laptop: the decoder's caps were plain `video/x-raw`/NV12, the video engine idled
+//! at 16 % while Render/3D sat at 80 % and the memory bus moved 8.8 GB/s (2026-09-08). Behind the
+//! upload the decoder keeps its zero-copy path, the tee shares GL buffers, and only the SECOND
+//! branch pays a readback — and only while it actually has a surface, because its valve drops
+//! everything otherwise.
 //!
 //! and each gtkglsink's GtkGLArea widget is what `linux_host` places below the WebView, one per
 //! slot (VIDEO_MULTISINK_WINDOW.md §4.2 — the video widget and the floating window at once).
+//!
+//! One such pipeline PER WINDOW. The main window's has both branches; the detached video window
+//! gets a pipeline of its own, fed the same access units from the same RTSP connection — never a
+//! second network stream, which over an LTE or Wi-Fi link to the aircraft would be the opposite of
+//! an improvement. It is a second DECODE (the macOS sink's D9 trade, for the same reason: a
+//! `gtkglsink` widget cannot move between windows, and two of them inside ONE pipeline cannot share
+//! the single GL context a pipeline distributes — across two pipelines they can, so the detached
+//! window keeps hardware-accelerated rendering instead of falling back to the CPU leg).
+//! Docked surfaces stay on ONE decode with a tee, deliberately: the Pi 5 decodes H.264 in software,
+//! where a second decode would cost far more than the CPU convert of the small second surface.
 //!
 //! BOTH branches are built up front and stay for the sink's life: the maximum is known (two), and
 //! adding a branch to a running pipeline means pad blocking and re-negotiation, which on the Pi's
@@ -122,12 +140,14 @@ struct Pacing {
 }
 
 pub struct LinuxVideoSink {
-    pipeline: gst::Pipeline,
-    appsrc: gst_app::AppSrc,
-    branches: Vec<Branch>,
+    /// One per window; `main` is built at start and lives as long as the sink, the detached video
+    /// window's comes and goes with its surfaces.
+    pipes: Mutex<Vec<Pipe>>,
+    /// What every new pipeline is built from.
+    codec: VideoCodec,
+    gl: bool,
     shared: Arc<Shared>,
     pacing: Mutex<Pacing>,
-    bus_thread: Option<JoinHandle<()>>,
     /// Conformance window stripped from this stream's SPS (module docs), if any.
     window: Option<Window>,
     geom: Mutex<Geom>,
@@ -143,9 +163,6 @@ pub fn hevc_decoder_is_stateless() -> bool {
 /// Last rect and orientation from the frontend — re-laid out when either changes.
 #[derive(Default)]
 struct Geom {
-    /// Per slot: the surface it currently serves and the rect that surface last published.
-    /// `None` = the slot is idle (its valve drops, its clip is hidden).
-    slots: Vec<Option<Slot>>,
     mirror: bool,
     rotate180: bool,
 }
@@ -158,6 +175,23 @@ struct Slot {
     key: String,
     /// The surface's own rect (physical px), before the conformance-window correction.
     rect: [i32; 8],
+}
+
+/// One window's pipeline: its own decode, its own branches, its own bus thread.
+struct Pipe {
+    /// Tauri window label whose host tree this pipeline renders into.
+    label: String,
+    pipeline: gst::Pipeline,
+    appsrc: gst_app::AppSrc,
+    branches: Vec<Branch>,
+    bus_thread: Option<JoinHandle<()>>,
+    /// Ends THIS pipeline's bus loop. The sink-wide `Shared::stopping` only ever ends all of them
+    /// at once, so a single window's teardown had nothing to stop its bus thread with and hung in
+    /// `join()` forever — with the sink mutex held, which then swallowed the next stop, the next
+    /// start ("Starting" for good) and the dock-back (Marc, 2026-09-08).
+    stopping: Arc<AtomicBool>,
+    /// Per slot: the surface it currently serves. `None` = idle (valve dropping, clip parked).
+    slots: Vec<Option<Slot>>,
 }
 
 /// One pipeline branch and the elements that belong only to it.
@@ -197,18 +231,37 @@ impl LinuxVideoSink {
             }
             _ => {}
         }
-        match Self::build(codec, gl, window) {
-            Ok(sink) => Ok(sink),
+        let shared = Arc::new(Shared::default());
+        let (main, gl) = match build_pipe("main", linux_host::SLOTS, codec, gl, &shared) {
+            Ok(p) => (p, gl),
             Err(e) if gl => {
                 log::warn!("[video] linux sink: GL sink unavailable ({e}) — using the cairo sink");
                 GL_UNAVAILABLE.store(true, Ordering::Relaxed);
-                Self::build(codec, false, window)
+                (build_pipe("main", linux_host::SLOTS, codec, false, &shared)?, false)
             }
-            Err(e) => Err(e),
-        }
+            Err(e) => return Err(e),
+        };
+        Ok(Self {
+            pipes: Mutex::new(vec![main]),
+            codec,
+            gl,
+            shared,
+            pacing: Mutex::new(Pacing::default()),
+            window,
+            geom: Mutex::new(Geom { mirror: false, rotate180: false }),
+        })
     }
+}
 
-    fn build(codec: VideoCodec, gl: bool, window: Option<Window>) -> Result<Self, String> {
+/// Build one window's pipeline with `slots` branches and start it. `label` names the host tree its
+/// widgets go into — the main window's, or the detached video window's.
+fn build_pipe(
+    label: &str,
+    slots: usize,
+    codec: VideoCodec,
+    gl: bool,
+    shared: &Arc<Shared>,
+) -> Result<Pipe, String> {
         let (parser, caps) = match codec {
             VideoCodec::H265 => ("h265parse", "video/x-h265,stream-format=byte-stream,alignment=au"),
             _ => ("h264parse", "video/x-h264,stream-format=byte-stream,alignment=au"),
@@ -250,17 +303,35 @@ impl LinuxVideoSink {
             });
         }
 
-        // One decode feeds every branch: the tee sits right behind decodebin3.
+        // One decode feeds every branch, and the split happens AFTER the upload (module docs): the
+        // decoder keeps whatever zero-copy memory it prefers, and the tee shares the uploaded
+        // frames.
         let tee = make("tee")?;
+        // ONLY the upload goes in front of the tee. The colour convert stays in the branches: in
+        // front, it would have to produce a format BOTH branches accept, which lands on RGBA — 3.7 MB
+        // per 720p frame against 1.4 MB as NV12, 221 MB/s of graphics memory instead of 83 at 60 fps.
+        // That surcharge eats exactly the headroom the window compositing needs, and the picture
+        // loses frames as the window grows (Marc, Debian 13, 2026-09-08). Behind the tee, branch 0
+        // is byte for byte the chain that shipped.
+        let head: Vec<gst::Element> = if gl { vec![make("glupload")?] } else { Vec::new() };
         pipeline
-            .add_many([appsrc.upcast_ref::<gst::Element>(), &parse, &decode, &tee])
+            .add_many([appsrc.upcast_ref::<gst::Element>(), &parse, &decode])
             .map_err(|e| format!("add: {e}"))?;
+        pipeline.add_many(head.iter()).map_err(|e| format!("add: {e}"))?;
+        pipeline.add(&tee).map_err(|e| format!("add: {e}"))?;
         gst::Element::link_many([appsrc.upcast_ref::<gst::Element>(), &parse, &decode])
             .map_err(|e| format!("link: {e}"))?;
+        gst::Element::link_many(head.iter()).map_err(|e| format!("link: {e}"))?;
+        // Cairo has no head at all — there the decoder's system memory IS the common denominator,
+        // so the tee sits right behind it.
+        match head.last() {
+            Some(last) => last.link(&tee).map_err(|e| format!("link head->tee: {e}"))?,
+            None => {}
+        }
         // decodebin3's source pad appears once the decoder negotiated: link it then.
-        let tee_in = tee.clone();
+        let head_in = head.first().cloned().unwrap_or_else(|| tee.clone());
         decode.connect_pad_added(move |_, pad| {
-            let Some(sinkpad) = tee_in.static_pad("sink") else { return };
+            let Some(sinkpad) = head_in.static_pad("sink") else { return };
             if sinkpad.is_linked() {
                 return;
             }
@@ -269,15 +340,22 @@ impl LinuxVideoSink {
             }
         });
 
-        let mut branches = Vec::with_capacity(linux_host::SLOTS);
-        for slot in 0..linux_host::SLOTS {
+        let mut branches = Vec::with_capacity(slots);
+        for slot in 0..slots {
             // A queue per branch so a slow one cannot stall the tee — and with it the other
             // branch. Leaky downstream: a branch that falls behind drops its own OLD frames
             // instead of building latency for everyone.
             let queue = make("queue")?;
-            queue.set_property("max-size-buffers", 3u32);
+            // Measured in TIME, not in buffers, and generously: in paced mode (`set_buffer` > 0) the
+            // sink holds every frame until its timestamp, so the cushion's worth of frames waits
+            // here. A three-buffer bucket threw the rest away — 60 fps in, ~10 fps on screen, while
+            // the counter in front of it still read 60 (Marc, 2026-09-08). One second covers every
+            // depth the stepper offers with room to spare; leaky only ever trips on a real overrun,
+            // and then it drops this branch's OLDEST frames rather than stalling the tee and with it
+            // the other branch.
+            queue.set_property("max-size-buffers", 0u32);
             queue.set_property("max-size-bytes", 0u32);
-            queue.set_property("max-size-time", 0u64);
+            queue.set_property("max-size-time", 1_000_000_000u64);
             queue.set_property_from_str("leaky", "downstream");
             // Idle slots drop here, before the colour convert and the render. `forward-sticky-events`
             // is not optional: the default `drop-all` swallows the CAPS event too, downstream never
@@ -288,25 +366,27 @@ impl LinuxVideoSink {
             valve.set_property_from_str("drop-mode", "forward-sticky-events");
             valve.set_property("drop", true);
 
-            // The post-decode leg: GL (zero-copy import where the decoder offers DMABuf) or cairo.
-            //
-            // ONLY THE FIRST branch gets GL. Two `gtkglsink`s in one pipeline each bring their own
-            // GtkGLArea and therefore their own GL context, while the pipeline distributes a single
-            // one — the second branch's `glupload` then has nothing it can negotiate against and the
-            // stream dies with `not-negotiated (-4)` at the appsrc, before a frame is shown. Proven
-            // by elimination on Debian 13 (2026-09-08): the same pipeline with BOTH branches on
-            // cairo runs clean through the sink's own start/stop test, and one GL branch alone runs
-            // in the app. So the second surface is converted on the CPU. It is the cheaper half of
-            // the deal anyway: the decode is shared (the tee sits behind the decoder), and the
-            // router hands slot 0 — the GL one — to the HIGHEST-priority surface, which is the big
-            // one; the second is normally the small widget tile.
-            let gl = gl && slot == 0;
-            let (leg, flip, sink) = if gl {
-                let upload = make("glupload")?;
+            // The branch itself. Only the FIRST one renders through GL: two `gtkglsink`s in one
+            // pipeline each bring their own GtkGLArea and therefore their own GL context, while a
+            // pipeline distributes a single one — the second then has nothing to negotiate against
+            // and the stream dies with `not-negotiated (-4)` at the appsrc, before a frame is shown
+            // (proven by elimination on Debian 13, 2026-09-08). The second branch therefore reads
+            // the frame back and renders on the CPU. It pays that only while it HAS a surface: its
+            // valve drops everything otherwise. Slot 0 goes to the highest-priority — largest —
+            // surface, so the readback serves the small widget tile.
+            let (leg, flip, sink) = if gl && slot == 0 {
                 let convert = make("glcolorconvert")?;
                 let flip = make("glvideoflip")?;
                 let sink = make("gtkglsink")?;
-                (vec![upload, convert, flip.clone(), sink.clone()], flip, sink)
+                (vec![convert, flip.clone(), sink.clone()], flip, sink)
+            } else if gl {
+                let convert = make("glcolorconvert")?;
+                let flip = make("glvideoflip")?;
+                let download = make("gldownload")?;
+                let to_cpu = make("videoconvert")?;
+                to_cpu.set_property("n-threads", 0u32);
+                let sink = make("gtksink")?;
+                (vec![convert, flip.clone(), download, to_cpu, sink.clone()], flip, sink)
             } else {
                 let convert = make("videoconvert")?;
                 // All cores: single-threaded the Pi 5 converts a cropped 720p60 HEVC at 45 fps,
@@ -335,7 +415,7 @@ impl LinuxVideoSink {
 
             // The widget must exist (and be realized, for GL) before the sink starts.
             let widget_sink = sink.clone();
-            let placed = linux_host::attach(slot, move || {
+            let placed = linux_host::attach(label, slot, move || {
                 Some(widget_sink.property::<gtk::Widget>("widget"))
             });
             match placed.recv_timeout(ATTACH_TIMEOUT) {
@@ -346,12 +426,15 @@ impl LinuxVideoSink {
             branches.push(Branch { valve, flip, sink });
         }
 
-        let shared = Arc::new(Shared::default());
         // Counted at the TEE's input, not at a sink: it is one number for the stream (as on the
         // other platforms), and a probe on one branch would read zero whenever that slot is the
         // idle one. The caps event carries the DISPLAY size — decoders report the cropped picture
         // there, the coded size stays in the meta.
-        if let Some(pad) = tee.static_pad("sink") {
+        //
+        // Only the MAIN pipeline counts. Every window decodes the same stream, so letting the
+        // detached window's pipeline add to the same counter reported 120 fps for a 60 fps source
+        // (Marc, 2026-09-08) — the panel shows the stream's rate, not the sum of the renders.
+        if let (Some(pad), true) = (tee.static_pad("sink"), label == "main") {
             let s = shared.clone();
             pad.add_probe(gst::PadProbeType::BUFFER, move |_, _| {
                 s.presented.fetch_add(1, Ordering::Relaxed);
@@ -367,7 +450,14 @@ impl LinuxVideoSink {
                             if w > 0 && h > 0 {
                                 s.width.store(w as u32, Ordering::Relaxed);
                                 s.height.store(h as u32, Ordering::Relaxed);
-                                log::info!("[video] linux sink: output {w}x{h} ({})", st.name());
+                                // The FULL caps, not just the structure name: the memory feature is
+                                // the whole story of whether the decoder hands its frames over
+                                // without a copy (`memory:DMABuf` / `memory:VAMemory`) or through
+                                // system RAM.
+                                log::info!(
+                                    "[video] linux sink: output {w}x{h} {}",
+                                    c.caps().to_string()
+                                );
                             }
                         }
                     }
@@ -377,41 +467,56 @@ impl LinuxVideoSink {
         }
 
         let bus = pipeline.bus().ok_or("no pipeline bus")?;
+        let stopping = Arc::new(AtomicBool::new(false));
         let bus_thread = {
-            let shared = shared.clone();
-            Some(std::thread::spawn(move || bus_loop(&bus, &shared)))
+            let shared = Arc::clone(shared);
+            let stopping = Arc::clone(&stopping);
+            Some(std::thread::spawn(move || bus_loop(&bus, &shared, &stopping)))
         };
 
         if let Err(e) = pipeline.set_state(gst::State::Playing) {
             let _ = pipeline.set_state(gst::State::Null);
-            shared.stopping.store(true, Ordering::SeqCst);
+            stopping.store(true, Ordering::SeqCst);
             if let Some(t) = bus_thread {
                 let _ = t.join();
             }
-            let _ = linux_host::detach().recv_timeout(ATTACH_TIMEOUT);
+            let _ = linux_host::detach(label).recv_timeout(ATTACH_TIMEOUT);
             let detail = shared.error.lock().unwrap().clone().unwrap_or_default();
             return Err(format!("pipeline start failed ({e}) {detail}"));
         }
         log::info!(
-            "[video] linux sink: {} pipeline up ({})",
+            "[video] linux sink: {} pipeline up in window {label} ({}, {slots} slot(s))",
             if matches!(codec, VideoCodec::H265) { "HEVC" } else { "H.264" },
             if gl { "GL" } else { "cairo" }
         );
-        Ok(Self {
+        Ok(Pipe {
+            label: label.to_string(),
             pipeline,
             appsrc,
             branches,
-            shared,
-            pacing: Mutex::new(Pacing::default()),
             bus_thread,
-            window,
-            geom: Mutex::new(Geom {
-                slots: vec![None; linux_host::SLOTS],
-                mirror: false,
-                rotate180: false,
-            }),
+            stopping,
+            slots: vec![None; slots],
         })
+}
+
+/// Stop one window's pipeline and give its widgets back, in the order the GL widget needs (see the
+/// sink's `Drop`).
+fn teardown_pipe(mut pipe: Pipe, shared: &Shared) {
+    // Before anything else: the bus loop is the one thread that must be told, and `join()` below
+    // waits for it.
+    pipe.stopping.store(true, Ordering::SeqCst);
+    let _ = pipe.appsrc.end_of_stream();
+    let _ = pipe.pipeline.set_state(gst::State::Null);
+    if let Some(t) = pipe.bus_thread.take() {
+        let _ = t.join();
     }
+    let _ = linux_host::detach(&pipe.label).recv_timeout(ATTACH_TIMEOUT);
+    let _ = shared;
+    log::info!("[video] linux sink: pipeline for window {} stopped", pipe.label);
+}
+
+impl LinuxVideoSink {
 
     /// Queue one access unit (Annex-B) with its unwrapped 90 kHz timestamp.
     pub fn push(&self, au: Vec<u8>, ts90k: u64) {
@@ -425,8 +530,12 @@ impl LinuxVideoSink {
         if let Some(b) = buffer.get_mut() {
             b.set_pts(gst::ClockTime::from_nseconds(pts));
         }
-        // Err = flushing/stopped: the stream is ending anyway.
-        let _ = self.appsrc.push_buffer(buffer);
+        // Every window's pipeline gets the SAME access unit from the one RTSP connection — the
+        // split is at the decoder, never at the network. Err = flushing/stopped: that pipeline is
+        // ending anyway.
+        for pipe in self.pipes.lock().unwrap().iter() {
+            let _ = pipe.appsrc.push_buffer(buffer.clone());
+        }
     }
 
     /// Media time → running-time PTS. Anchored at the first frame so the picture starts
@@ -467,8 +576,13 @@ impl LinuxVideoSink {
         }
     }
 
+    /// The MAIN pipeline's running time. With a second window open there are two clocks, but the
+    /// pacing cushion is one number for the stream and the difference between two pipelines started
+    /// seconds apart is far below the cushion itself.
     fn running_time(&self) -> u64 {
-        match (self.pipeline.clock(), self.pipeline.base_time()) {
+        let pipes = self.pipes.lock().unwrap();
+        let Some(pipe) = pipes.first() else { return 0 };
+        match (pipe.pipeline.clock(), pipe.pipeline.base_time()) {
             (Some(clock), Some(base)) => clock.time().map(|t| t.saturating_sub(base).nseconds()).unwrap_or(0),
             _ => 0,
         }
@@ -479,77 +593,113 @@ impl LinuxVideoSink {
         self.shared.error.lock().unwrap().clone()
     }
 
-    /// The surfaces to present into (VIDEO_MULTISINK_WINDOW.md §4.1), highest priority first and
-    /// capped at [`linux_host::SLOTS`]. A surface keeps the slot it already had — its branch owns a
-    /// realized GL widget, so moving a picture between slots would mean moving that widget, which
-    /// is precisely what must not happen (see `linux_host`). Slots nobody claims are idled: valve
-    /// dropping, clip hidden.
+    /// The surfaces to present into (VIDEO_MULTISINK_WINDOW.md §4.1), highest priority first.
     ///
-    /// Only the MAIN window's surfaces are servable: the GTK host layer lives there, so a surface
-    /// published by the detached video window has nowhere to go here and must not be drawn into the
-    /// main window instead. A second host — a second window's own overlay tree — is the follow-up.
+    /// Grouped BY WINDOW: each window has its own pipeline (the main one, and the detached video
+    /// window's while it is open), and within a window the surfaces are capped at
+    /// [`linux_host::SLOTS`] and assigned to seats. A surface keeps the seat it already had — its
+    /// branch owns a realized GL widget, and moving a picture between seats would mean moving that
+    /// widget, which is precisely what must not happen (see `linux_host`). Seats nobody claims are
+    /// idled: valve dropping, clip parked.
+    ///
+    /// A window that appears gets a pipeline built for it; one whose surfaces are all gone has its
+    /// pipeline torn down, so a closed detached window costs nothing.
     pub fn set_surfaces(&self, surfaces: &[SinkSurface]) {
-        let want: Vec<&SinkSurface> = surfaces
-            .iter()
-            .filter(|s| s.window == "main")
-            .take(linux_host::SLOTS)
-            .collect();
-
-        let mut g = self.geom.lock().unwrap();
-        // Keep every surface that still wants a slot where it is, then fill the freed slots with
-        // the newcomers in priority order.
-        for slot in g.slots.iter_mut() {
-            if let Some(cur) = slot {
-                if !want.iter().any(|s| s.key == cur.key) {
-                    *slot = None;
-                }
+        // Which windows want something, in first-seen (priority) order.
+        let mut windows: Vec<&str> = Vec::new();
+        for s in surfaces {
+            if !windows.iter().any(|w| *w == s.window) {
+                windows.push(&s.window);
             }
         }
-        for s in &want {
-            let rect = [s.full.0, s.full.1, s.full.2, s.full.3, s.clip.0, s.clip.1, s.clip.2, s.clip.3];
-            if let Some(cur) = g.slots.iter_mut().flatten().find(|c| c.key == s.key) {
-                cur.rect = rect;
+
+        let mut pipes = self.pipes.lock().unwrap();
+        // Gone: every pipeline except the main one whose window asks for nothing any more.
+        let mut i = 0;
+        while i < pipes.len() {
+            if pipes[i].label != "main" && !windows.iter().any(|w| *w == pipes[i].label) {
+                let pipe = pipes.remove(i);
+                let shared = Arc::clone(&self.shared);
+                // The window's video layer goes back NOW, from this thread: `uninstall` only posts
+                // to the GTK loop, so it lands there before anything a pipeline built later can
+                // queue — the layer can never be pulled out from under a NEW window of the same
+                // name. What is left is GStreamer work that waits for that same loop, so it must
+                // not run here: this is called with the sink's lock held, and on the GTK thread
+                // itself whenever a Tauri command drives it. Off it goes.
+                linux_host::uninstall(&pipe.label);
+                std::thread::spawn(move || teardown_pipe(pipe, &shared));
+            } else {
+                i += 1;
+            }
+        }
+        // New: a window with surfaces and no pipeline yet. ONE slot — a second window shows one
+        // picture, and two `gtkglsink`s in one pipeline cannot share its single GL context.
+        for w in &windows {
+            if pipes.iter().any(|p| p.label == *w) {
                 continue;
             }
-            let Some(free) = g.slots.iter_mut().find(|c| c.is_none()) else { continue };
-            *free = Some(Slot { key: s.key.clone(), rect });
+            match build_pipe(w, 1, self.codec, self.gl, &self.shared) {
+                Ok(p) => pipes.push(p),
+                Err(e) => log::warn!("[video] linux sink: no pipeline for window {w}: {e}"),
+            }
         }
-        // Which slot each surface ended up in, in the published (priority) order — the host stacks
-        // the clips by it, because two surfaces may overlap.
-        let order: Vec<usize> = want
-            .iter()
-            .filter_map(|s| g.slots.iter().position(|c| c.as_ref().is_some_and(|c| c.key == s.key)))
-            .collect();
-        let live: Vec<bool> = g.slots.iter().map(|c| c.is_some()).collect();
-        drop(g);
 
-        for (slot, on) in live.iter().enumerate() {
-            if let Some(b) = self.branches.get(slot) {
-                b.valve.set_property("drop", !on);
+        for pipe in pipes.iter_mut() {
+            let want: Vec<&SinkSurface> = surfaces
+                .iter()
+                .filter(|s| s.window == pipe.label)
+                .take(pipe.slots.len())
+                .collect();
+            // Keep every surface that still wants a seat where it is, then fill the freed seats
+            // with the newcomers in priority order.
+            for seat in pipe.slots.iter_mut() {
+                if let Some(cur) = seat {
+                    if !want.iter().any(|s| s.key == cur.key) {
+                        *seat = None;
+                    }
+                }
             }
-            if *on {
-                self.apply_rect(slot);
+            for s in &want {
+                let rect = [s.full.0, s.full.1, s.full.2, s.full.3, s.clip.0, s.clip.1, s.clip.2, s.clip.3];
+                if let Some(cur) = pipe.slots.iter_mut().flatten().find(|c| c.key == s.key) {
+                    cur.rect = rect;
+                    continue;
+                }
+                let Some(free) = pipe.slots.iter_mut().find(|c| c.is_none()) else { continue };
+                *free = Some(Slot { key: s.key.clone(), rect });
             }
-            linux_host::set_visible(slot, *on);
-        }
-        if !order.is_empty() {
-            linux_host::restack(order);
+            // Which seat each surface ended up in, in the published (priority) order — the host
+            // stacks the clips by it, because two surfaces may overlap.
+            let order: Vec<usize> = want
+                .iter()
+                .filter_map(|s| pipe.slots.iter().position(|c| c.as_ref().is_some_and(|c| c.key == s.key)))
+                .collect();
+
+            for slot in 0..pipe.slots.len() {
+                let live = pipe.slots[slot].clone();
+                if let Some(b) = pipe.branches.get(slot) {
+                    b.valve.set_property("drop", live.is_none());
+                }
+                if let Some(seat) = live {
+                    linux_host::set_rect(&pipe.label, slot, self.host_rect(seat.rect));
+                }
+                linux_host::set_visible(&pipe.label, slot, pipe.slots[slot].is_some());
+            }
+            if !order.is_empty() {
+                linux_host::restack(&pipe.label, order);
+            }
         }
     }
 
-    /// Lay one slot's widget out. With a stripped window the DISPLAY picture is aspect-fitted into
-    /// the full box and the widget grown to the CODED picture around it, so the padding rows
-    /// fall outside the visible box; the visible box is also clipped to the fitted picture
-    /// (a letterboxed box would otherwise show the padding in its bars).
-    fn apply_rect(&self, slot: usize) {
+    /// Turn a surface's rect into the one the host lays the widget out with. With a stripped
+    /// conformance window the DISPLAY picture is aspect-fitted into the full box and the widget
+    /// grown to the CODED picture around it, so the padding rows fall outside the visible box; the
+    /// visible box is also clipped to the fitted picture (a letterboxed box would otherwise show
+    /// the padding in its bars). Without a window it is the surface's own rect.
+    fn host_rect(&self, rect: [i32; 8]) -> [i32; 8] {
+        let [x, y, w, h, cx, cy, cw, ch] = rect;
+        let Some(win) = self.window else { return rect };
         let g = self.geom.lock().unwrap();
-        let Some(Some([x, y, w, h, cx, cy, cw, ch])) = g.slots.get(slot).map(|c| c.as_ref().map(|c| c.rect)) else {
-            return;
-        };
-        let Some(win) = self.window else {
-            linux_host::set_rect(slot, [x, y, w, h, cx, cy, cw, ch]);
-            return;
-        };
         let (dw, dh) = (win.display_w().max(1) as f64, win.display_h().max(1) as f64);
         let scale = (w as f64 / dw).min(h as f64 / dh);
         let (fw, fh) = (dw * scale, dh * scale);
@@ -561,19 +711,28 @@ impl LinuxVideoSink {
         let (vx, vy) = ((cx as f64).max(fx), (cy as f64).max(fy));
         let (vx2, vy2) = (((cx + cw) as f64).min(fx + fw), ((cy + ch) as f64).min(fy + fh));
         let r = |v: f64| v.round() as i32;
-        linux_host::set_rect(
-            slot,
-            [
-                r(fx - left * scale),
-                r(fy - top * scale),
-                r(win.coded_w as f64 * scale),
-                r(win.coded_h as f64 * scale),
-                r(vx),
-                r(vy),
-                r((vx2 - vx).max(1.0)),
-                r((vy2 - vy).max(1.0)),
-            ],
-        );
+        [
+            r(fx - left * scale),
+            r(fy - top * scale),
+            r(win.coded_w as f64 * scale),
+            r(win.coded_h as f64 * scale),
+            r(vx),
+            r(vy),
+            r((vx2 - vx).max(1.0)),
+            r((vy2 - vy).max(1.0)),
+        ]
+    }
+
+    /// Re-apply every live seat's rect — after an orientation change, which moves the padding.
+    fn relayout(&self) {
+        let pipes = self.pipes.lock().unwrap();
+        for pipe in pipes.iter() {
+            for (slot, seat) in pipe.slots.iter().enumerate() {
+                if let Some(seat) = seat {
+                    linux_host::set_rect(&pipe.label, slot, self.host_rect(seat.rect));
+                }
+            }
+        }
     }
 
     /// Smoothing-buffer depth in frames (0 = render on decode, the latency-first default).
@@ -581,8 +740,10 @@ impl LinuxVideoSink {
         let frames = frames.min(3);
         let before = self.shared.buffer_frames.swap(frames, Ordering::Relaxed);
         if (before == 0) != (frames == 0) {
-            for b in &self.branches {
-                b.sink.set_property("sync", frames > 0);
+            for pipe in self.pipes.lock().unwrap().iter() {
+                for b in &pipe.branches {
+                    b.sink.set_property("sync", frames > 0);
+                }
             }
         }
     }
@@ -595,25 +756,21 @@ impl LinuxVideoSink {
             (false, true) => "180",
             (true, true) => "vert", // mirror + 180° = vertical flip
         };
-        // Per branch: the flip element belongs to one leg, so every leg needs telling.
-        for b in &self.branches {
-            b.flip.set_property_from_str("video-direction", direction);
+        // Per branch: the flip element belongs to one leg, so every leg of every pipeline needs
+        // telling.
+        for pipe in self.pipes.lock().unwrap().iter() {
+            for b in &pipe.branches {
+                b.flip.set_property_from_str("video-direction", direction);
+            }
         }
-        let live: Vec<usize> = {
+        {
             let mut g = self.geom.lock().unwrap();
             g.mirror = mirror;
             g.rotate180 = rotate180;
-            g.slots
-                .iter()
-                .enumerate()
-                .filter_map(|(i, c)| c.is_some().then_some(i))
-                .collect()
-        };
-        // A flip moves the conformance-window padding, so every live slot is laid out again.
+        }
+        // A flip moves the conformance-window padding, so every live seat is laid out again.
         if self.window.is_some() {
-            for slot in live {
-                self.apply_rect(slot);
-            }
+            self.relayout();
         }
     }
 
@@ -642,21 +799,30 @@ impl Drop for LinuxVideoSink {
     /// blocked main thread, and the main loop must be free when it happens.
     fn drop(&mut self) {
         self.shared.stopping.store(true, Ordering::SeqCst);
-        let _ = self.appsrc.end_of_stream();
-        let _ = self.pipeline.set_state(gst::State::Null);
-        if let Some(t) = self.bus_thread.take() {
-            let _ = t.join();
+        // Inline, unlike the single-window teardown above: the sink is going away as a whole, so
+        // nothing can build a pipeline behind our back, and the caller (a stream stop, a restart)
+        // must not find half a sink still holding GL widgets.
+        let pipes: Vec<Pipe> = self.pipes.lock().unwrap().drain(..).collect();
+        for pipe in pipes {
+            let label = pipe.label.clone();
+            teardown_pipe(pipe, &self.shared);
+            // A window of its own (the detached one) hands its video layer back with the pipeline
+            // that fed it. Leaving it on file would make the NEXT window under that label inherit a
+            // tree belonging to a destroyed one — see the rebuild check in `linux_host`. The main
+            // window keeps its layer: it outlives every stream and is only ever installed once.
+            if label != "main" {
+                linux_host::uninstall(&label);
+            }
+            // The pipeline drops at the end of this iteration — step (3).
         }
-        let _ = linux_host::detach().recv_timeout(ATTACH_TIMEOUT);
-        // `self.pipeline` drops after this body — step (3).
     }
 }
 
 /// Pipeline errors → the sink's error slot (the stream ends on it and the frontend
 /// reconnects with a fresh sink); warnings go to the log only.
-fn bus_loop(bus: &gst::Bus, shared: &Shared) {
+fn bus_loop(bus: &gst::Bus, shared: &Shared, stopping: &AtomicBool) {
     use gst::MessageView;
-    while !shared.stopping.load(Ordering::SeqCst) {
+    while !shared.stopping.load(Ordering::SeqCst) && !stopping.load(Ordering::SeqCst) {
         let Some(msg) = bus.timed_pop_filtered(
             gst::ClockTime::from_mseconds(200),
             &[gst::MessageType::Error, gst::MessageType::Warning, gst::MessageType::HaveContext],
@@ -675,7 +841,15 @@ fn bus_loop(bus: &gst::Bus, shared: &Shared) {
             }
             MessageView::Error(e) => {
                 let debug = e.debug().map(|d| d.to_string()).unwrap_or_default();
-                shared.fail(format!("{src}: {} ({debug})", e.error()));
+                // A pipeline on its way out takes its window's widgets with it, and whatever it
+                // shouts on the way ("Output widget was destroyed") is expected — it must not end
+                // the STREAM, which is what happened when the detached window closed while its
+                // last frames were still in flight (Marc, 2026-09-08).
+                if stopping.load(Ordering::SeqCst) {
+                    log::debug!("[video] linux sink: {src} while stopping: {}", e.error());
+                } else {
+                    shared.fail(format!("{src}: {} ({debug})", e.error()));
+                }
             }
             MessageView::Warning(w) => {
                 log::debug!("[video] linux sink: {src}: {}", w.error());
@@ -730,7 +904,7 @@ mod tests {
         let vbox = gtk::Box::new(gtk::Orientation::Vertical, 0);
         window.add(&vbox);
         window.show_all();
-        linux_host::install_tree(&window, &vbox, None).expect("host tree");
+        linux_host::install_tree_for("main", &window, &vbox, None).expect("host tree");
 
         let done = Arc::new(AtomicBool::new(false));
         let worker = {
@@ -824,7 +998,7 @@ mod tests {
         }
         vbox.pack_start(&webview, true, true, 0);
         window.show_all();
-        linux_host::install_tree(&window, &vbox, Some(webview.upcast_ref())).expect("host tree");
+        linux_host::install_tree_for("main", &window, &vbox, Some(webview.upcast_ref())).expect("host tree");
 
         let done = Arc::new(AtomicBool::new(false));
         let worker = {

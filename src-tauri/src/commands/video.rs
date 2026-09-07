@@ -495,6 +495,11 @@ pub fn video_detached_open(
                 .register_window(DETACHED_LABEL, handle.0 as isize),
             Err(e) => log::warn!("[video] detached window has no native handle ({e}) — no picture there"),
         }
+        // Linux: the detached window needs a video layer tree of its own. A GStreamer sink's widget
+        // cannot move between windows, so that window gets its own host — and its own pipeline in
+        // `linux_sink`, fed the same access units from the one RTSP connection.
+        #[cfg(target_os = "linux")]
+        crate::video::linux_host::install_for(&app, DETACHED_LABEL);
         let app_handle = app.clone();
         win.on_window_event(move |event| {
             if matches!(event, tauri::WindowEvent::Destroyed) {
@@ -554,9 +559,19 @@ pub fn video_detached_close(app: AppHandle) -> Result<(), String> {
     {
         use tauri::Manager;
 
+        // Surfaces first, window second. On Linux that window owns a GStreamer pipeline rendering
+        // into a widget INSIDE it, and withdrawing the surfaces is what stops that pipeline. The
+        // last frames may still be in flight when the window goes — a stopping pipeline's
+        // complaints are swallowed rather than ending the stream (see `linux_sink`'s bus loop).
+        app.state::<crate::video::rtsp_native::NativeRtsp>()
+            .forget_window(DETACHED_LABEL);
         if let Some(win) = app.get_webview_window(DETACHED_LABEL) {
             win.destroy().map_err(|e| e.to_string())?;
         }
+        // Belt and braces: whatever route the pipeline took down, this window's video layer must
+        // not outlive it (`linux_host` explains what an inherited one does to the next window).
+        #[cfg(target_os = "linux")]
+        crate::video::linux_host::uninstall(DETACHED_LABEL);
         Ok(())
     }
     #[cfg(not(desktop))]
@@ -564,4 +579,27 @@ pub fn video_detached_close(app: AppHandle) -> Result<(), String> {
         let _ = app;
         Ok(())
     }
+}
+
+/// What the detached window's page handles itself: the rects of its overlay buttons (while they
+/// are on screen) and of its resize corner, in CSS px, plus whether dragging the picture may move
+/// the window at all. Linux reads them from the GTK press handler — see `video::linux_drag`, which
+/// also explains why the move cannot go through `startDragging()` there. A no-op elsewhere.
+#[tauri::command]
+pub fn video_detached_chrome(zones: DetachedChrome) {
+    #[cfg(target_os = "linux")]
+    crate::video::linux_drag::set_zones(zones.drag, zones.grip, zones.chrome);
+    #[cfg(not(target_os = "linux"))]
+    let _ = zones;
+}
+
+/// The page's layout, as [`video_detached_chrome`] takes it.
+#[derive(serde::Deserialize)]
+pub struct DetachedChrome {
+    /// Dragging the picture moves the window (false while fullscreen).
+    pub drag: bool,
+    /// The resize corner, `[x, y, w, h]`.
+    pub grip: Option<[f64; 4]>,
+    /// Rects the page wants the press for.
+    pub chrome: Vec<[f64; 4]>,
 }

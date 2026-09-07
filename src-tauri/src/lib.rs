@@ -97,7 +97,7 @@ use commands::video::{
     video_rtsp_native_sink_surfaces, video_rtsp_native_stats,
     video_linux_hole_spike,
     video_rtsp_native_sink_buffer, video_rtsp_native_sink_orient,
-    video_detached_open, video_detached_close, video_detached_pin_top,
+    video_detached_open, video_detached_close, video_detached_pin_top, video_detached_chrome,
 };
 use video::{MediaMtx, MjpegServer};
 use commands::logging::{set_log_level, get_log_path, log_session_settings, log_frontend};
@@ -780,6 +780,7 @@ pub fn run() {
             video_detached_open,
             video_detached_close,
             video_detached_pin_top,
+            video_detached_chrome,
             radar_configure,
             radar_set_center,
             radar_set_node_pos,

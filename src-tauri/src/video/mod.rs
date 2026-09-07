@@ -27,6 +27,9 @@ pub mod win_sink;
 pub mod android_sink;
 /// Linux GTK host for the hole-punch surface below the WebKitWebView (MOBILE_RTSP.md P2.3).
 #[cfg(target_os = "linux")]
+pub mod linux_drag;
+
+#[cfg(target_os = "linux")]
 pub mod linux_host;
 /// Linux GStreamer H264/HEVC sink into that host (MOBILE_RTSP.md P2.3).
 #[cfg(target_os = "linux")]
