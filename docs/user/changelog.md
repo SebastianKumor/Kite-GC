@@ -105,11 +105,20 @@ below. The release you are reading the docs for is expanded; click an older vers
       the link, the recording and the track running while Kite is minimised. [#111]
     - **High-Resolution 3D** — the globe at native pixel density (sharp on phones, tablets and
       high-DPI screens) or at half resolution for weak GPUs; Settings → Interface → Map. [#111]
+    - **The video shows in two places at once** — with Kite's own RTSP client the picture now runs
+      in the Video widget **and** the floating window (or the fullscreen swap) at the same time,
+      as it always did with the other sources. One decode feeds both. [#129]
     - **Desktop video window with a park button** — Start slides the window in, the camera button
       beside it parks and recalls it while the source runs; glass bezel, resize corner, no ✕. The
       Video panel replaces its preview with a status block (state, resolution, fps, codec, bitrate). [#127]
     - **Long-press widget editing on the desktop** — hold a widget (mouse or touch) to enter edit
       mode and drag it right away; the ✎ button is gone. Click outside the docks or Escape to leave. [#127]
+
+    **Removed**
+
+    - **Video window (detach)** — the old detached window was the browser's Picture-in-Picture: it
+      never worked with Kite's own RTSP client and only ever existed on Windows. A real detached
+      video window, on every desktop system, replaces it. [#129]
 
     **Improved**
 
@@ -164,3 +173,4 @@ below. The release you are reading the docs for is expanded; click an older vers
 [#123]: https://github.com/b14ckyy/Kite-GC/pull/123
 [#126]: https://github.com/b14ckyy/Kite-GC/pull/126
 [#127]: https://github.com/b14ckyy/Kite-GC/pull/127
+[#129]: https://github.com/b14ckyy/Kite-GC/pull/129
