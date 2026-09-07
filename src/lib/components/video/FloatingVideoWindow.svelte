@@ -43,7 +43,7 @@
   } from '$lib/stores/video';
   import { canvasSink, mjpegSink } from '$lib/controllers/mjpegSink';
   import { detachVideo } from '$lib/controllers/detachedVideo';
-  import { isWindows } from '$lib/platform';
+  import { isMacOS, isWindows } from '$lib/platform';
   import { nativeSurface, activeNativeSurfaces } from '$lib/controllers/nativeVideo';
   import { doubleTap, mouseDoubleClick } from '$lib/helpers/doubleTap';
   import { beginFloatMove, startFloatMove, startFloatResize } from '$lib/helpers/floatWindowGestures';
@@ -68,9 +68,9 @@
   const live = $derived($videoState.status === 'live');
   /** The unplug button: take the picture out of the app into its own window (D3). Native decode
    *  sink only (D2) — the DOM paths render into THIS WebView and cannot be handed to another one.
-   *  Windows only for now: the macOS/Linux hosts live in the main window, so a second window has
-   *  nowhere to put the picture until they grow one (VIDEO_MULTISINK_WINDOW.md §4.2). */
-  const canDetach = $derived(isWindows && live && $videoState.nativeSink);
+   *  Not on Linux: its GStreamer host still lives in the main window, so a second window has
+   *  nowhere to put the picture until it grows one (VIDEO_MULTISINK_WINDOW.md §4.2). */
+  const canDetach = $derived((isWindows || isMacOS) && live && $videoState.nativeSink);
   /** Narrow derived, not a raw store read in the effect below (that would re-run it on every
    *  telemetry patch): detaching must skip the slide-out — see there. */
   const detached = $derived($videoState.undocked);

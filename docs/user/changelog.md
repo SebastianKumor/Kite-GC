@@ -48,7 +48,7 @@ below. The release you are reading the docs for is expanded; click an older vers
         place and, if you left it that way, in fullscreen. The detached window has no title bar: the
         buttons appear when the pointer is over it — top-left brings the picture home, bottom-right
         goes fullscreen. Drag the picture to move it, the top-right corner resizes it, and the frame
-        keeps the stream's aspect ratio. Windows for now. [#130]
+        keeps the stream's aspect ratio. Windows and macOS. [#130] · [#132]
 
     ??? info "Telemetry API — live telemetry for other programs"
         Kite can now **serve its live telemetry as JSON** to anything that can read it: an NDJSON
@@ -125,10 +125,10 @@ below. The release you are reading the docs for is expanded; click an older vers
       window when you hover it; the detached window's own hover buttons bring the picture back
       (top-left) and switch to fullscreen (bottom-right). Where it stands — including fullscreen —
       is remembered; if that screen is gone next time, it opens on Kite's own. Needs the Native RTSP
-      client, Windows for now. [#130]
+      client, Windows and macOS. [#130] · [#132]
     - **The video shows in two places at once** — with Kite's own RTSP client the picture now runs
       in the Video widget **and** the floating window (or the fullscreen swap) at the same time,
-      as it always did with the other sources. One decode feeds both. [#129]
+      as it always did with the other sources. One decode feeds both. [#129] · [#132]
     - **Desktop video window with a park button** — Start slides the window in, the camera button
       beside it parks and recalls it while the source runs; glass bezel, resize corner, no ✕. The
       Video panel replaces its preview with a status block (state, resolution, fps, codec, bitrate). [#127]
@@ -196,3 +196,4 @@ below. The release you are reading the docs for is expanded; click an older vers
 [#127]: https://github.com/b14ckyy/Kite-GC/pull/127
 [#129]: https://github.com/b14ckyy/Kite-GC/pull/129
 [#130]: https://github.com/b14ckyy/Kite-GC/pull/130
+[#132]: https://github.com/b14ckyy/Kite-GC/pull/132

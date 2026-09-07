@@ -512,7 +512,9 @@ impl NativeRtsp {
         }))
     }
 
-    #[cfg(desktop)]
+    /// Windows only: the AppKit and GTK hosts find a window by its Tauri LABEL, so only the
+    /// Windows sink — which parents a child window to a native handle — needs this.
+    #[cfg(target_os = "windows")]
     /// Register `window`'s native handle so surfaces published from it can be hosted
     /// (VIDEO_MULTISINK_WINDOW.md §5.1). Called when the detached video window is created — before
     /// its page can publish anything, so its first surface list already resolves to a parent.

@@ -505,6 +505,11 @@ pub fn video_detached_open(
             }
         });
         let _ = win.show();
+        // Re-assert it after the window is realised: the builder flag is applied during creation,
+        // and this is the one property the window exists for (D12).
+        let _ = win.set_always_on_top(true);
+        #[cfg(target_os = "macos")]
+        crate::video::apple_host::float_window(DETACHED_LABEL.to_string());
         log::info!("[video] detached window opened at {x},{y} {w}x{h} (fullscreen={fullscreen})");
         Ok(())
     }
@@ -512,6 +517,32 @@ pub fn video_detached_open(
     {
         let _ = (app, x, y, w, h, fullscreen);
         Err("the detached video window is desktop-only".to_string())
+    }
+}
+
+/// Put the detached video window back above the others. Needed after every fullscreen toggle:
+/// tao ends its borderless-fullscreen mode by setting `NSNormalWindowLevel` unconditionally, so a
+/// window that was pinned comes back out of fullscreen at the normal level and sinks behind
+/// whatever the user clicks next (Marc, macOS, 2026-09-08). The viewer calls this itself, because
+/// it is the only side that knows a toggle happened.
+#[tauri::command(async)]
+pub fn video_detached_pin_top(app: AppHandle) -> Result<(), String> {
+    #[cfg(desktop)]
+    {
+        use tauri::Manager;
+
+        if let Some(win) = app.get_webview_window(DETACHED_LABEL) {
+            let _ = win.set_always_on_top(true);
+        }
+        // ...and on macOS at the level AppKit actually means — see `float_window`.
+        #[cfg(target_os = "macos")]
+        crate::video::apple_host::float_window(DETACHED_LABEL.to_string());
+        Ok(())
+    }
+    #[cfg(not(desktop))]
+    {
+        let _ = app;
+        Ok(())
     }
 }
 
