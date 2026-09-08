@@ -31,6 +31,15 @@
 //! Docked surfaces stay on ONE decode with a tee, deliberately: the Pi 5 decodes H.264 in software,
 //! where a second decode would cost far more than the CPU convert of the small second surface.
 //!
+//! EXCEPT on the V4L2 stateless decoder (Pi 5 HEVC), which does not survive a second consumer of
+//! its frames at all: with the readback branch running next to the GL sink, its capture buffers go
+//! back from a second thread and are re-armed by the decode thread microseconds later, the driver
+//! refuses the next `VIDIOC_S_EXT_CTRLS`, and the plugin walks on into a SIGSEGV instead of ending
+//! the stream (Marc, 2026-09-08 — gdb inside `libgstv4l2codecs`, confirmed frame by frame with
+//! `GST_DEBUG`; VA-API on the laptop never showed it). There the main window is served by ONE
+//! PIPELINE PER SEAT, the shape the detached window has been using all along — see
+//! `LinuxVideoSink::per_slot`. Two pipelines never share a buffer.
+//!
 //! BOTH branches are built up front and stay for the sink's life: the maximum is known (two), and
 //! adding a branch to a running pipeline means pad blocking and re-negotiation, which on the Pi's
 //! stateless decoder is exactly the kind of interruption it cannot conceal. An unused branch is
@@ -181,6 +190,9 @@ struct Slot {
 struct Pipe {
     /// Tauri window label whose host tree this pipeline renders into.
     label: String,
+    /// First host seat this pipeline renders into; it owns `slot_base .. slot_base + branches`.
+    /// Several pipelines of one window sit side by side in per-seat mode (see `per_slot`).
+    slot_base: usize,
     pipeline: gst::Pipeline,
     appsrc: gst_app::AppSrc,
     branches: Vec<Branch>,
@@ -234,17 +246,24 @@ impl LinuxVideoSink {
         let shared = Arc::new(Shared::default());
         // What the app is to treat as the picture's size — see the probe below.
         let display = window.map(|w| (w.display_w(), w.display_h()));
-        let (main, gl) = match build_pipe("main", linux_host::SLOTS, codec, gl, display, &shared) {
+        // The decoder decides the shape of the main window's pipeline(s) — see [`build_main`].
+        let per_slot = v4l2_hevc;
+        if per_slot {
+            log::info!(
+                "[video] linux sink: one pipeline per seat — the stateless V4L2 decoder does not share its frames"
+            );
+        }
+        let (main, gl) = match build_main(per_slot, codec, gl, display, &shared) {
             Ok(p) => (p, gl),
             Err(e) if gl => {
                 log::warn!("[video] linux sink: GL sink unavailable ({e}) — using the cairo sink");
                 GL_UNAVAILABLE.store(true, Ordering::Relaxed);
-                (build_pipe("main", linux_host::SLOTS, codec, false, display, &shared)?, false)
+                (build_main(per_slot, codec, false, display, &shared)?, false)
             }
             Err(e) => return Err(e),
         };
         Ok(Self {
-            pipes: Mutex::new(vec![main]),
+            pipes: Mutex::new(main),
             codec,
             gl,
             shared,
@@ -255,10 +274,54 @@ impl LinuxVideoSink {
     }
 }
 
-/// Build one window's pipeline with `slots` branches and start it. `label` names the host tree its
-/// widgets go into — the main window's, or the detached video window's.
+/// The main window's pipeline(s): one per seat where the decoder demands it, otherwise a single one
+/// with a branch per seat. A half-built set is taken down rather than handed back — the caller
+/// retries the whole thing without GL.
+///
+/// `per_slot` is for the V4L2 stateless decoder (Pi 5 HEVC), which does not survive a second, slower
+/// consumer of its frames. With the readback branch running alongside the GL sink its capture
+/// buffers go back from a second thread and are re-armed by the decode thread microseconds later;
+/// the driver then refuses the next `VIDIOC_S_EXT_CTRLS` ("Driver did not accept the bitstream
+/// parameters") and the plugin walks on into a SIGSEGV instead of ending the stream (Marc, Pi 5,
+/// 2026-09-08 — gdb backtrace inside `libgstv4l2codecs`, confirmed frame by frame with `GST_DEBUG`).
+/// Two pipelines never share a buffer, and two `gtkglsink`s CAN live side by side across pipelines —
+/// that is what the detached window has been doing all along.
+///
+/// The price is a second decode; on that hardware it is a hardware decode, and the machine already
+/// runs two whenever the picture is detached. Everywhere else the tee stays: with one decode
+/// upstream of it a second surface costs 5-6 % of a core instead of a whole decoder, and VA-API (the
+/// laptop) never showed the defect.
+fn build_main(
+    per_slot: bool,
+    codec: VideoCodec,
+    gl: bool,
+    display: Option<(u32, u32)>,
+    shared: &Arc<Shared>,
+) -> Result<Vec<Pipe>, String> {
+    if !per_slot {
+        return Ok(vec![build_pipe("main", 0, linux_host::SLOTS, codec, gl, display, shared)?]);
+    }
+    let mut pipes = Vec::with_capacity(linux_host::SLOTS);
+    for slot in 0..linux_host::SLOTS {
+        match build_pipe("main", slot, 1, codec, gl, display, shared) {
+            Ok(p) => pipes.push(p),
+            Err(e) => {
+                for p in pipes {
+                    teardown_pipe(p, shared);
+                }
+                return Err(e);
+            }
+        }
+    }
+    Ok(pipes)
+}
+
+/// Build one pipeline with `slots` branches and start it. `label` names the host tree its widgets
+/// go into — the main window's, or the detached video window's — and `slot_base` the first seat in
+/// it that this pipeline serves.
 fn build_pipe(
     label: &str,
+    slot_base: usize,
     slots: usize,
     codec: VideoCodec,
     gl: bool,
@@ -418,7 +481,7 @@ fn build_pipe(
 
             // The widget must exist (and be realized, for GL) before the sink starts.
             let widget_sink = sink.clone();
-            let placed = linux_host::attach(label, slot, move || {
+            let placed = linux_host::attach(label, slot_base + slot, move || {
                 Some(widget_sink.property::<gtk::Widget>("widget"))
             });
             match placed.recv_timeout(ATTACH_TIMEOUT) {
@@ -437,7 +500,7 @@ fn build_pipe(
         // Only the MAIN pipeline counts. Every window decodes the same stream, so letting the
         // detached window's pipeline add to the same counter reported 120 fps for a 60 fps source
         // (Marc, 2026-09-08) — the panel shows the stream's rate, not the sum of the renders.
-        if let (Some(pad), true) = (tee.static_pad("sink"), label == "main") {
+        if let (Some(pad), true) = (tee.static_pad("sink"), label == "main" && slot_base == 0) {
             let s = shared.clone();
             pad.add_probe(gst::PadProbeType::BUFFER, move |_, _| {
                 s.presented.fetch_add(1, Ordering::Relaxed);
@@ -491,17 +554,19 @@ fn build_pipe(
             if let Some(t) = bus_thread {
                 let _ = t.join();
             }
-            let _ = linux_host::detach(label).recv_timeout(ATTACH_TIMEOUT);
+            let _ =
+                linux_host::detach(label, slot_base..slot_base + slots).recv_timeout(ATTACH_TIMEOUT);
             let detail = shared.error.lock().unwrap().clone().unwrap_or_default();
             return Err(format!("pipeline start failed ({e}) {detail}"));
         }
         log::info!(
-            "[video] linux sink: {} pipeline up in window {label} ({}, {slots} slot(s))",
+            "[video] linux sink: {} pipeline up in window {label} ({}, {slots} slot(s) from seat {slot_base})",
             if matches!(codec, VideoCodec::H265) { "HEVC" } else { "H.264" },
             if gl { "GL" } else { "cairo" }
         );
         Ok(Pipe {
             label: label.to_string(),
+            slot_base,
             pipeline,
             appsrc,
             branches,
@@ -522,7 +587,8 @@ fn teardown_pipe(mut pipe: Pipe, shared: &Shared) {
     if let Some(t) = pipe.bus_thread.take() {
         let _ = t.join();
     }
-    let _ = linux_host::detach(&pipe.label).recv_timeout(ATTACH_TIMEOUT);
+    let seats = pipe.slot_base..pipe.slot_base + pipe.branches.len();
+    let _ = linux_host::detach(&pipe.label, seats).recv_timeout(ATTACH_TIMEOUT);
     let _ = shared;
     log::info!("[video] linux sink: pipeline for window {} stopped", pipe.label);
 }
@@ -650,21 +716,41 @@ impl LinuxVideoSink {
                 continue;
             }
             let display = self.window.map(|win| (win.display_w(), win.display_h()));
-            match build_pipe(w, 1, self.codec, self.gl, display, &self.shared) {
+            match build_pipe(w, 0, 1, self.codec, self.gl, display, &self.shared) {
                 Ok(p) => pipes.push(p),
                 Err(e) => log::warn!("[video] linux sink: no pipeline for window {w}: {e}"),
             }
         }
 
-        for pipe in pipes.iter_mut() {
-            let want: Vec<&SinkSurface> = surfaces
-                .iter()
-                .filter(|s| s.window == pipe.label)
-                .take(pipe.slots.len())
-                .collect();
+        // Seats belong to the WINDOW, not to one pipeline: in per-seat mode the main window's are
+        // spread over several of them, and a surface has to keep the seat it holds no matter which
+        // pipeline owns it.
+        let labels: Vec<String> = pipes.iter().fold(Vec::new(), |mut v, p| {
+            if !v.iter().any(|l| l == &p.label) {
+                v.push(p.label.clone());
+            }
+            v
+        });
+        for label in labels {
+            // This window's seats as (pipeline, branch, host seat), in seat order.
+            let mut seats: Vec<(usize, usize, usize)> = Vec::new();
+            for (pi, p) in pipes.iter().enumerate() {
+                if p.label != label {
+                    continue;
+                }
+                for b in 0..p.slots.len() {
+                    seats.push((pi, b, p.slot_base + b));
+                }
+            }
+            seats.sort_by_key(|(_, _, host_slot)| *host_slot);
+
+            let want: Vec<&SinkSurface> =
+                surfaces.iter().filter(|s| s.window == label).take(seats.len()).collect();
+            let mut held: Vec<Option<Slot>> =
+                seats.iter().map(|(pi, b, _)| pipes[*pi].slots[*b].clone()).collect();
             // Keep every surface that still wants a seat where it is, then fill the freed seats
             // with the newcomers in priority order.
-            for seat in pipe.slots.iter_mut() {
+            for seat in held.iter_mut() {
                 if let Some(cur) = seat {
                     if !want.iter().any(|s| s.key == cur.key) {
                         *seat = None;
@@ -673,32 +759,34 @@ impl LinuxVideoSink {
             }
             for s in &want {
                 let rect = [s.full.0, s.full.1, s.full.2, s.full.3, s.clip.0, s.clip.1, s.clip.2, s.clip.3];
-                if let Some(cur) = pipe.slots.iter_mut().flatten().find(|c| c.key == s.key) {
+                if let Some(cur) = held.iter_mut().flatten().find(|c| c.key == s.key) {
                     cur.rect = rect;
                     continue;
                 }
-                let Some(free) = pipe.slots.iter_mut().find(|c| c.is_none()) else { continue };
+                let Some(free) = held.iter_mut().find(|c| c.is_none()) else { continue };
                 *free = Some(Slot { key: s.key.clone(), rect });
             }
             // Which seat each surface ended up in, in the published (priority) order — the host
             // stacks the clips by it, because two surfaces may overlap.
             let order: Vec<usize> = want
                 .iter()
-                .filter_map(|s| pipe.slots.iter().position(|c| c.as_ref().is_some_and(|c| c.key == s.key)))
+                .filter_map(|s| held.iter().position(|c| c.as_ref().is_some_and(|c| c.key == s.key)))
+                .map(|i| seats[i].2)
                 .collect();
 
-            for slot in 0..pipe.slots.len() {
-                let live = pipe.slots[slot].clone();
-                if let Some(b) = pipe.branches.get(slot) {
-                    b.valve.set_property("drop", live.is_none());
+            for (i, (pi, b, host_slot)) in seats.iter().enumerate() {
+                let live = held[i].clone();
+                if let Some(branch) = pipes[*pi].branches.get(*b) {
+                    branch.valve.set_property("drop", live.is_none());
                 }
-                if let Some(seat) = live {
-                    linux_host::set_rect(&pipe.label, slot, self.host_rect(seat.rect));
+                if let Some(seat) = &live {
+                    linux_host::set_rect(&label, *host_slot, self.host_rect(seat.rect));
                 }
-                linux_host::set_visible(&pipe.label, slot, pipe.slots[slot].is_some());
+                linux_host::set_visible(&label, *host_slot, live.is_some());
+                pipes[*pi].slots[*b] = live;
             }
             if !order.is_empty() {
-                linux_host::restack(&pipe.label, order);
+                linux_host::restack(&label, order);
             }
         }
     }
@@ -741,7 +829,8 @@ impl LinuxVideoSink {
         for pipe in pipes.iter() {
             for (slot, seat) in pipe.slots.iter().enumerate() {
                 if let Some(seat) = seat {
-                    linux_host::set_rect(&pipe.label, slot, self.host_rect(seat.rect));
+                    let host_slot = pipe.slot_base + slot;
+                    linux_host::set_rect(&pipe.label, host_slot, self.host_rect(seat.rect));
                 }
             }
         }

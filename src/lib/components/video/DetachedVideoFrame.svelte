@@ -55,6 +55,12 @@
     reconnectAttempt: 0,
   });
   let fullscreen = $state(false);
+  /** Is [`fullscreen`] the window's real state yet? Until it is, NOTHING may set the aspect lock:
+   *  a lock set while the window is ALREADY fullscreen squeezes it — GTK applies the aspect to the
+   *  fullscreen configure as well — and lifting it afterwards does not give the height back. The
+   *  picture then sits in a window 80 px shorter than the screen, with the desktop above and below
+   *  it where the letterbox belongs (Marc, Pi 5, 2026-09-08). */
+  let stateKnown = $state(false);
   /** The windowed box (physical px) — kept across a fullscreen trip, which must not be saved as it. */
   let box = $state<{ x: number; y: number; w: number; h: number } | null>(null);
   /** The overlay controls and the resize corner — their rects go to the backend (`pushZones`). */
@@ -157,6 +163,7 @@
       .isFullscreen()
       .then((f) => {
         fullscreen = f;
+        stateKnown = true;
         return readBox();
       })
       .catch(() => {});
@@ -218,8 +225,10 @@
   }
 
   $effect(() => {
-    // Read both synchronously — an effect tracks nothing an await hides.
+    // Read all three synchronously — an effect tracks nothing an await hides.
+    const known = stateKnown;
     const aspect = fullscreen ? 0 : feed.aspect;
+    if (!known) return;
     void pushAspect(aspect);
   });
 
@@ -283,7 +292,12 @@
 
   async function toggleFullscreen(): Promise<void> {
     const next = !fullscreen;
-    if (next) await readBox(); // keep the windowed box; fullscreen must not overwrite it
+    if (next) {
+      await readBox(); // keep the windowed box; fullscreen must not overwrite it
+      // And let the shape go BEFORE the compositor sizes the window: the lock constrains the
+      // fullscreen configure too, and releasing it afterwards leaves the window short.
+      await pushAspect(0);
+    }
     fullscreen = next;
     await win.setFullscreen(next);
     // macOS drops the window's level on the way out of fullscreen (see video_detached_pin_top),

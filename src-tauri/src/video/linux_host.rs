@@ -352,7 +352,7 @@ pub fn attach(
 
 /// Remove every video widget and hide every layer. The receiver yields once the main loop did
 /// it — a sink tears its pipeline down only after that (see linux_sink's Drop).
-pub fn detach(label: &str) -> std::sync::mpsc::Receiver<()> {
+pub fn detach(label: &str, slots: std::ops::Range<usize>) -> std::sync::mpsc::Receiver<()> {
     let (tx, rx) = std::sync::mpsc::channel();
     let label = label.to_string();
     // Not through `on_main`: the answer has to come even when the tree is already gone (a window
@@ -361,7 +361,10 @@ pub fn detach(label: &str) -> std::sync::mpsc::Receiver<()> {
     glib::MainContext::default().invoke(move || {
         HOSTS.with(|h| {
             if let Some(host) = h.borrow_mut().get_mut(&label) {
-                for slot in 0..host.outs.len() {
+                // Only this pipeline's seats: a window may be served by SEVERAL pipelines
+                // (`linux_sink`'s per-seat mode), and one of them going away must not pull the
+                // others' widgets out of the tree.
+                for slot in slots {
                     detach_widget(host, slot);
                     if let Some(out) = host.outs.get_mut(slot) {
                         out.parked = true;
@@ -390,7 +393,7 @@ fn detach_widget(host: &mut Host, slot: usize) {
 #[cfg(debug_assertions)]
 pub fn spike(on: bool) {
     if !on {
-        let _ = detach("main");
+        let _ = detach("main", 0..SLOTS);
         return;
     }
     let _ = attach("main", 0, || {
