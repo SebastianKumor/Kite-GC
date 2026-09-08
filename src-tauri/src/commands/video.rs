@@ -652,10 +652,27 @@ pub fn video_detached_nudge(app: AppHandle) {
         let Some(win) = app.get_webview_window(DETACHED_LABEL) else { return };
         // Off the caller's thread: both halves need the compositor to have acted in between.
         std::thread::spawn(move || {
-            let settle = std::time::Duration::from_millis(220);
+            let settle = std::time::Duration::from_millis(200);
             if win.is_fullscreen().unwrap_or(false) {
+                // Leaving fullscreen is not necessarily a SIZE change, and only a size change
+                // rebuilds the buffer. A window that was CREATED fullscreen — Kite restarted with
+                // the picture detached and full screen — has no windowed size to fall back to and
+                // comes out of fullscreen exactly as large as it went in, so the garbage stayed
+                // until Marc resized the window by hand (Pi 5, 2026-09-08). Force the change, then
+                // put the size back before returning to fullscreen: what the window remembers as
+                // its windowed box must not shrink just because we shook it.
                 let _ = win.set_fullscreen(false);
                 std::thread::sleep(settle);
+                if let Ok(size) = win.inner_size() {
+                    let smaller = tauri::PhysicalSize::new(
+                        size.width.saturating_sub(64).max(320),
+                        size.height.saturating_sub(64).max(240),
+                    );
+                    let _ = win.set_size(smaller);
+                    std::thread::sleep(settle);
+                    let _ = win.set_size(size);
+                    std::thread::sleep(settle);
+                }
                 let _ = win.set_fullscreen(true);
                 return;
             }
