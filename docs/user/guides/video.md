@@ -24,9 +24,9 @@ is remembered between sessions.
     nothing should be converted (see the
     [platform notes](#platform-notes-what-to-expect-per-operating-system)).
     **HEVC/H.265** plays wherever the **Kite RTSP client** does the decoding: always on **Android**,
-    and on **Windows** and **Linux** with the *Native RTSP client* toggle on (hardware decode; Windows
-    additionally needs the free "HEVC Video Extensions" from the Microsoft Store). On macOS, HEVC is
-    not available.
+    and on **Windows**, **Linux** and **macOS** with the *Native RTSP client* toggle on (hardware
+    decode; Windows additionally needs the free "HEVC Video Extensions" from the Microsoft Store).
+    macOS is the one platform whose classic engine path plays HEVC as well.
 
     Other codecs — VP8, VP9, AV1 — are **not supported**. A stream Kite cannot play usually shows up
     as an endless *"Reconnecting…"* rather than a clear error. If you need one of them, please open a
@@ -91,8 +91,8 @@ The RTSP source has a small **connection manager** built in:
   costs exactly that much extra latency, so leave it at 0 when the picture is already smooth. The
   setting takes effect immediately on the running stream and is remembered.
 - **Native RTSP client (experimental)** — Kite's own built-in stream client: no helper downloads,
-  UDP-first connection with automatic TCP fallback, and native hardware H.264/HEVC decode on Windows
-  and Linux (Android always uses it; there is no toggle there). Recommended on Linux — see the
+  UDP-first connection with automatic TCP fallback, and native hardware H.264/HEVC decode on Windows,
+  Linux and macOS (Android always uses it; there is no toggle there). Recommended on Linux — see the
   [platform notes](#platform-notes-what-to-expect-per-operating-system). If a particular source
   misbehaves with it, switch it off to fall back to the classic engine path.
 
@@ -116,7 +116,6 @@ signal dips don't interrupt the stream unnecessarily.
 
 The same feed can appear in several places at once (they all share one stream):
 
-- **In the panel** — a preview right in the Video panel.
 - **As a widget** — the **Video** widget in a dock, sized to the stream's aspect ratio.
 - **In a floating window** — a movable video frame over the map. **Drag the video body** to move it;
   dragging it to the **bottom-left corner snaps it there**, where it **displaces the bottom widget dock**
@@ -125,13 +124,21 @@ The same feed can appear in several places at once (they all share one stream):
   **On a phone** there is a **docked window** instead: fixed to the bottom-right of the map, sized to
   the stream (at most 40 % of the map height or half its width), no dragging or resizing. A **camera
   button** above the map buttons slides it off-screen to the right and back — it appears once a source
-  runs and hides while the Video widget is active. The panel on the phone has no preview.
-- **In a detached window** (**Windows only** — see the [platform notes](#platform-notes-what-to-expect-per-operating-system);
-  the button is simply absent elsewhere) — a separate, free-floating **OS window** you can place anywhere,
-  including **outside the app** or on a second monitor. Opened from the Video panel; because it lives outside the
-  app it's closed from the OS (not from inside Kite), and — unlike the floating window — it **can't host
-  the map** (no swap). It's also the **lightest** option: the OS draws it directly, so on low-power
-  systems using only the detached window keeps GPU load to a minimum.
+  runs and hides while the Video widget is active.
+- **In a detached window** — the floating window taken **out of the app** into its own window, which
+  you can put anywhere: beside Kite, or on a second monitor that then becomes your video screen. It
+  **stays on top of other applications** and looks exactly like the frame inside the app.
+  Hold the pointer over the floating window and an **unplug button** appears in its **top-left
+  corner**; that takes the picture out. The detached window has no title bar — its buttons appear
+  when the pointer is over it: **top-left brings the picture back into the app**, **bottom-right
+  switches to fullscreen** on the screen it is on (or press `Esc`). Drag the picture to move it,
+  the **top-right corner** resizes it, and the frame keeps the stream's aspect ratio.
+  It **can't host the map** (double-click does nothing there), and where it stands — including
+  fullscreen — is remembered: quit while detached and it comes back detached, on the same screen. If
+  that screen is gone, it opens at a default size on Kite's own screen.
+  Requires the **Native RTSP client** — on **Windows**, **macOS** and **Linux**; the
+  [platform notes](#platform-notes-what-to-expect-per-operating-system) say what a Wayland desktop
+  does differently.
 
 ![The floating video window and the video widget](../assets/guides/video/video_floating_widget.png)
 /// caption
@@ -194,6 +201,13 @@ low-CPU, low-latency feed is important to you — and especially if you plan to 
 the platforms we can most confidently recommend. For RTSP network streams, Linux joins them once
 the **Native RTSP client** is switched on — see below.
 
+**On macOS both RTSP routes are available.** The classic engine plays H.264 *and* HEVC directly (the
+macOS browser engine is the only one that accepts HEVC on that path), and the **Native RTSP client**
+toggle switches to Kite's own client: H.264 and HEVC are decoded by the system's VideoToolbox and
+drawn straight into the video area — no helper programs, UDP-first with TCP fallback, mirror and
+rotate live. Either route is fine; the native one skips the helper download and the local relay leg.
+The detached video window works here too, and so does showing the picture in two places at once.
+
 **On Linux, switch on the *Native RTSP client* for network streams.** With that toggle (Video panel →
 RTSP section) Kite plays RTSP itself: **H.264 and HEVC go straight into the machine's hardware
 decoder** — Intel/AMD graphics via VA-API, the Raspberry Pi 4's H.264 and the Pi 5's HEVC block via
@@ -205,6 +219,8 @@ not hold 50 fps. MJPEG sources are passed through untouched, as always. The clie
 distribution's GStreamer plugins (the **.deb** installs them automatically; elsewhere:
 `gstreamer1.0-plugins-base`, `…-good`, `…-bad`, `gstreamer1.0-gtk3` and `gstreamer1.0-libav`, or your
 distro's equivalents) — if one is missing, Kite reports which GStreamer element it could not find.
+Showing the picture in **two places at once** and the **detached video window** both work on this
+route; the notes below say what each of them costs.
 
 !!! note "Raspberry Pi 5 and HEVC"
     Encoders that pad the picture height to their block size — NVENC at 720p codes 736 rows, every
@@ -259,9 +275,16 @@ cannot fix from its side on that classic path:
   Kite works around the worst cases (it caps the automatic resolution and frame rate, and routes the
   advanced capture path around that layer entirely), but a camera the system itself can't open cleanly
   is out of reach.
-- **Picture-in-Picture** (the detached "Video Window") is a Windows-only feature — neither the Linux nor
-  the macOS browser engine offers the interface Kite would need for it. All the in-app surfaces
-  (panel, widget, floating window, full-screen swap) work everywhere.
+- **The detached video window works, but it cannot stay on top of everything on Wayland.** Current
+  desktops that run on Wayland — GNOME's default — do not let an application put its own window
+  above other applications, so the detached window takes its turn in the normal stacking order
+  there. Put it on a second monitor or beside Kite and it stays where you want it. The window also
+  decodes the picture for itself (a window cannot borrow another window's hardware video surface),
+  so it costs a second hardware decode of the same stream.
+- **The picture in two places at once costs a conversion.** The second place is drawn by the
+  processor rather than the graphics chip (two hardware-accelerated surfaces cannot share one
+  pipeline), which on a desktop costs a few percent of one core for a widget-sized tile. All the
+  in-app surfaces (widget, floating window, full-screen swap) work everywhere.
 
 None of this means Linux is unusable — with the **Native RTSP client** it is a first-class platform
 for network video, and a well-equipped desktop distribution generally plays the classic path fine

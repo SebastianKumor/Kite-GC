@@ -17,7 +17,12 @@ pub mod v4l2;
 pub mod mjpeg_server;
 pub mod rtsp;
 pub mod rtsp_native;
+/// What the frontend's surface routers publish — the holes every decode sink presents into.
+pub mod surface;
 /// Windows H264/HEVC decode + render sink for the hole-punch surface (MOBILE_RTSP.md P2.1).
+#[cfg(target_os = "windows")]
+pub mod win_aspect;
+
 #[cfg(target_os = "windows")]
 pub mod win_sink;
 /// Android H264/HEVC MediaCodec sink for the same hole-punch surface (MOBILE_RTSP.md P2.2).
@@ -25,10 +30,17 @@ pub mod win_sink;
 pub mod android_sink;
 /// Linux GTK host for the hole-punch surface below the WebKitWebView (MOBILE_RTSP.md P2.3).
 #[cfg(target_os = "linux")]
+pub mod linux_drag;
+
+#[cfg(target_os = "linux")]
 pub mod linux_host;
 /// Linux GStreamer H264/HEVC sink into that host (MOBILE_RTSP.md P2.3).
 #[cfg(target_os = "linux")]
 pub mod linux_sink;
+#[cfg(target_os = "macos")]
+pub mod apple_host;
+#[cfg(target_os = "macos")]
+pub mod apple_sink;
 
 pub use mediamtx::MediaMtx;
 pub use mjpeg_server::MjpegServer;

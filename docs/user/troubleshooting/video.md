@@ -206,8 +206,8 @@ sustain. Two things are worth knowing:
   again while the machine was busy. That is the reason a frame rate that is effortless on Windows can be
   out of reach on comparable Linux hardware — and the reason the point above matters so much more here.
 - **Show the video in fewer places at once.** The stream is read and decoded **once** for all of them,
-  so this costs less than it used to — but every visible surface (panel preview, widget, floating
-  window) is still drawn and composited separately, so closing the ones you don't need still helps.
+  so this costs less than it used to — but every visible surface (widget, floating window, fullscreen
+  swap) is still drawn and composited separately, so closing the ones you don't need still helps.
 
 Converting a 720p60 stream in software is simply beyond a small machine, and no setting inside Kite
 changes that arithmetic — the picture has to get smaller or slower at the source.

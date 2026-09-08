@@ -190,8 +190,16 @@
   function onZoomEnd() {
     const lat = followCurrent?.lat ?? 0;
     for (const mk of [uavMarker, playbackMarker]) mk?.setIcon(makeModelIcon(modelSizePx(lat)));
+    modelDrawnKey = ''; // new canvas → the cached "already drawn" state is stale
     applyFollowFrame();
   }
+
+  // The model is rasterised in software (uavTopDown.ts) — the one expensive step of a follow frame.
+  // It runs at the ATTITUDE DATA rate, not the display rate: the marker position and the map
+  // centre keep gliding every frame (cheap Leaflet calls), but the drawing only changes when the
+  // telemetry attitude changed, so the raster is skipped while the eased position catches up.
+  // Marc, 2026-09-08: no smoothing on the 2D model — a real update, a real redraw, nothing else.
+  let modelDrawnKey = '';
 
   const ARMING_FLAG_ARMED = 2;
   const MIN_TRAIL_DIST = 1; // meters — don't add trail point if moved less
@@ -1241,6 +1249,13 @@
   let activeColor = '#37a8db';
   let followRaf: number | null = null;
   let followLastT = 0;
+  // The 2D map stays mounted under the 3D view (the live track lives in its Leaflet layers). Its
+  // follow loop must NOT: every frame it software-rasterises the UAV model into the marker canvas
+  // and re-centres the hidden Leaflet map (tile requests included) — measured at 3–10 % of the main
+  // thread while 3D was on screen (Sony XQ-CT54, 2026-09-08). While 3D shows, targets are still
+  // recorded (turn rate, last position); the loop parks, and the switch back snaps to the newest
+  // target. The trail append is a separate path and keeps running — the track must never be lost.
+  let followParked = false;
   // True only while applyFollowFrame() drives a programmatic recenter. Leaflet fires `moveend`
   // SYNCHRONOUSLY inside setView, so saveMapState would otherwise persist the UAV-locked centre
   // 60×/s — writing the settings store from inside the render flush (→ effect_update_depth_exceeded)
@@ -1292,6 +1307,10 @@
     else if (turnArcShown && timeMs - turnArcLastActiveTs > TURN_HOLD_MS) turnArcShown = false;
 
     followTarget = { lat, lon, heading, pitch, roll, course, speed, turnRate: turnRateDegS };
+    if (mapViewMode === '3d') {
+      followParked = true;
+      return;
+    }
     if (!followCurrent) {
       followCurrent = { ...followTarget };
       applyFollowFrame();
@@ -1308,6 +1327,7 @@
 
   function followLoop(t: number) {
     if (!followTarget || !followCurrent) { followRaf = null; return; }
+    if (mapViewMode === '3d') { followRaf = null; followParked = true; return; }
     const dt = followLastT ? Math.min(120, t - followLastT) : 16;
     followLastT = t;
     const k = 1 - Math.exp(-dt / FOLLOW_TAU_MS); // framerate-normalized ease
@@ -1356,12 +1376,26 @@
 
   /** Apply the eased frame: move + redraw the active marker always, recenter (+rotate) the map
    *  only while following. */
+  /** 3D → 2D: resume from the newest target without gliding in from a minutes-old position. */
+  $effect(() => {
+    if (mapViewMode !== '2d' || !followParked) return;
+    followParked = false;
+    if (!followTarget) return;
+    followCurrent = { ...followTarget };
+    applyFollowFrame();
+  });
+
   function applyFollowFrame() {
     if (!map || !followCurrent) return;
     const ll: L.LatLngExpression = [followCurrent.lat, followCurrent.lon];
     if (activeFollowMarker) {
       activeFollowMarker.setLatLng(ll);
-      drawModel(activeFollowMarker, followCurrent.heading, followCurrent.pitch, followCurrent.roll, activeColor);
+      const t = followTarget ?? followCurrent;
+      const key = `${t.heading}|${t.pitch}|${t.roll}|${activeColor}|${activeFollowMarker === uavMarker}`;
+      if (key !== modelDrawnKey) {
+        modelDrawnKey = key;
+        drawModel(activeFollowMarker, t.heading, t.pitch, t.roll, activeColor);
+      }
     }
     redrawDirLines();
     // Don't fight an in-progress zoom animation (would snap mid-zoom).

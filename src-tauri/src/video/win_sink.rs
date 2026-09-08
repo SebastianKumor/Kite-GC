@@ -70,11 +70,14 @@ use windows::Win32::Media::MediaFoundation::{
 use windows::Win32::System::Com::{CoInitializeEx, CoTaskMemFree, COINIT_MULTITHREADED};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, PeekMessageW,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, IsWindow, PeekMessageW,
     RegisterClassW, SetWindowPos, ShowWindow, TranslateMessage, HWND_BOTTOM, MSG, PM_REMOVE,
-    SWP_NOACTIVATE, SWP_NOZORDER, SW_HIDE, SW_SHOWNA, WINDOW_EX_STYLE, WNDCLASSW, WS_CHILD,
+    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_SHOWNA, WINDOW_EX_STYLE,
+    WNDCLASSW, WS_CHILD,
     WS_VISIBLE,
 };
+
+use super::surface::SinkSurface;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SinkCodec {
@@ -85,17 +88,6 @@ pub enum SinkCodec {
 enum Cmd {
     /// One Annex-B access unit + its (unwrapped) RTP timestamp in 90 kHz ticks.
     Frame(Vec<u8>, u64),
-    /// `full` = the surface's whole box (video layout / aspect fit), `clip` = the visible
-    /// part after scroll-container clipping — the window sits at `clip` and the picture is
-    /// shifted + source-cropped so it gets CUT at the container edge, never shrunk.
-    Rect { full: (i32, i32, i32, i32), clip: (i32, i32, i32, i32) },
-    Visible(bool),
-    /// Smoothing-buffer depth in frames (0 = present on decode, the latency-first
-    /// default). See `SinkState::pump_queue`.
-    Buffer(u32),
-    /// Horizontal mirror / 180° rotation, pre-combined into the two flip axes the video
-    /// processor takes (mirror = flip-H; rotate180 = flip-H+flip-V; both = flip-V).
-    Orient { flip_h: bool, flip_v: bool },
     Stop,
 }
 
@@ -106,6 +98,46 @@ struct Shared {
     size: Mutex<Option<(u32, u32)>>,
     error: Mutex<Option<String>>,
     stopped: AtomicBool,
+    /// Geometry / visibility / orientation, LATEST WINS — deliberately NOT on the frame
+    /// channel. The sink thread handles one channel message per loop pass and each pass
+    /// presents (vsync-paced, ~16 ms), so ~60 control messages a second — what a window drag
+    /// produces — queued up behind the frames and drained at frame rate: the layer trailed
+    /// the DOM by the whole backlog, and a park/unpark landed a second or two late (Marc,
+    /// 2026-09-08). Here a burst collapses to its newest value, applied once per pass.
+    ctrl: Mutex<Ctrl>,
+    ctrl_dirty: AtomicBool,
+}
+
+/// Pending control state (`None` = unchanged since the thread last applied it).
+#[derive(Default)]
+struct Ctrl {
+    /// Every surface the picture must appear in right now (VIDEO_MULTISINK_WINDOW.md §4.1). The
+    /// list is complete: a surface that is not in it has no output any more, which is what makes
+    /// visibility implicit. Each carries its FULL box (the video's aspect-fit layout) and its
+    /// VISIBLE box (the child window sits there and the picture is CUT at that edge, never shrunk).
+    surfaces: Option<Vec<SinkSurface>>,
+    /// Smoothing-buffer depth in frames (0 = present on decode, the latency-first
+    /// default). See `SinkState::pump_queue`.
+    buffer: Option<u32>,
+    /// Horizontal mirror / 180° rotation, pre-combined into the two flip axes the video
+    /// processor takes (mirror = flip-H; rotate180 = flip-H+flip-V; both = flip-V).
+    orient: Option<(bool, bool)>,
+}
+
+impl Shared {
+    /// Queue a control change for the sink thread (latest wins).
+    fn ctrl(&self, f: impl FnOnce(&mut Ctrl)) {
+        f(&mut self.ctrl.lock().unwrap());
+        self.ctrl_dirty.store(true, Ordering::Release);
+    }
+
+    /// Everything queued since the last call, or `None` when nothing changed.
+    fn take_ctrl(&self) -> Option<Ctrl> {
+        if !self.ctrl_dirty.swap(false, Ordering::Acquire) {
+            return None;
+        }
+        Some(std::mem::take(&mut *self.ctrl.lock().unwrap()))
+    }
 }
 
 /// Handle to the sink thread. Dropping stops it.
@@ -116,21 +148,18 @@ pub struct WinVideoSink {
 }
 
 impl WinVideoSink {
-    /// Spawn the sink: child window at `rect` (PHYSICAL px, parent client coords) inside
-    /// `parent_hwnd`, decoder for `codec`. Returns once device + decoder initialised —
-    /// "HEVC Video Extensions missing" style failures surface here, before any stream runs.
-    pub fn start(
-        parent_hwnd: isize,
-        rect: (i32, i32, i32, i32),
-        codec: SinkCodec,
-    ) -> Result<Self, String> {
+    /// Spawn the sink for `codec`. Returns once device + decoder initialised — "HEVC Video
+    /// Extensions missing" style failures surface here, before any stream runs. It presents
+    /// nothing until the first surface list arrives: each surface brings the window it is parented
+    /// to, so the sink needs no window handle of its own.
+    pub fn start(codec: SinkCodec) -> Result<Self, String> {
         let (tx, rx) = std::sync::mpsc::channel::<Cmd>();
         let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<(), String>>();
         let shared = Arc::new(Shared::default());
         let shared2 = shared.clone();
         let join = std::thread::Builder::new()
             .name("win-video-sink".into())
-            .spawn(move || run_sink(parent_hwnd, rect, codec, rx, ready_tx, shared2))
+            .spawn(move || run_sink(codec, rx, ready_tx, shared2))
             .map_err(|e| format!("sink thread spawn: {e}"))?;
         match ready_rx.recv_timeout(Duration::from_secs(8)) {
             Ok(Ok(())) => Ok(Self { tx, join: Some(join), shared }),
@@ -146,25 +175,23 @@ impl WinVideoSink {
         let _ = self.tx.send(Cmd::Frame(au, rtp_ts_90k));
     }
 
-    /// Full box `x/y/w/h` for the video layout, visible part `cx/cy/cw/ch` for the clip.
-    #[allow(clippy::too_many_arguments)]
-    pub fn set_rect(&self, x: i32, y: i32, w: i32, h: i32, cx: i32, cy: i32, cw: i32, ch: i32) {
-        let _ = self.tx.send(Cmd::Rect { full: (x, y, w, h), clip: (cx, cy, cw, ch) });
-    }
-
-    pub fn set_visible(&self, visible: bool) {
-        let _ = self.tx.send(Cmd::Visible(visible));
+    /// The complete set of surfaces to present into (latest wins). An output is created for a key
+    /// that appears, hidden when it stops being published, and dropped once the cache outgrows what
+    /// the router can ask for.
+    pub fn set_surfaces(&self, surfaces: &[SinkSurface]) {
+        let list = surfaces.to_vec();
+        self.shared.ctrl(|c| c.surfaces = Some(list));
     }
 
     /// Smoothing-buffer depth in frames (0 = present on decode). Capped small — the DXVA
     /// decoder's surface pool is finite and held frames come out of it.
     pub fn set_buffer(&self, frames: u32) {
-        let _ = self.tx.send(Cmd::Buffer(frames.min(3)));
+        self.shared.ctrl(|c| c.buffer = Some(frames.min(3)));
     }
 
     /// Horizontal mirror / 180° rotation of the presented picture.
     pub fn set_orient(&self, mirror: bool, rotate180: bool) {
-        let _ = self.tx.send(Cmd::Orient { flip_h: mirror != rotate180, flip_v: rotate180 });
+        self.shared.ctrl(|c| c.orient = Some((mirror != rotate180, rotate180)));
     }
 
     pub fn frames_presented(&self) -> u64 {
@@ -205,8 +232,6 @@ unsafe extern "system" fn sink_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
 }
 
 fn run_sink(
-    parent_hwnd: isize,
-    rect: (i32, i32, i32, i32),
     codec: SinkCodec,
     rx: Receiver<Cmd>,
     ready_tx: Sender<Result<(), String>>,
@@ -222,7 +247,7 @@ fn run_sink(
         }
     });
 
-    let mut state = match unsafe { SinkState::init(parent_hwnd, rect, codec) } {
+    let mut state = match unsafe { SinkState::init(codec) } {
         Ok(s) => {
             let _ = ready_tx.send(Ok(()));
             s
@@ -234,12 +259,32 @@ fn run_sink(
     };
 
     loop {
+        // `stop()` flips this before its channel message, which would otherwise wait out a
+        // frame backlog.
+        if shared.stopped.load(Ordering::Acquire) {
+            break;
+        }
         // Pump the child window's messages (it lives on this thread).
         unsafe {
             let mut msg = MSG::default();
             while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
                 let _ = TranslateMessage(&msg);
                 DispatchMessageW(&msg);
+            }
+        }
+        // Geometry / visibility FIRST and off the frame channel: the newest values win, so a
+        // drag's 60 rect updates a second cost one SetWindowPos per pass instead of queueing
+        // behind the frames (see `Shared::ctrl`). The layer then lands within a pass of the
+        // DOM hole, and show/hide is immediate.
+        if let Some(c) = shared.take_ctrl() {
+            if let Some(surfaces) = c.surfaces {
+                unsafe { state.sync_surfaces(&surfaces) };
+            }
+            if let Some(frames) = c.buffer {
+                state.buffer_frames = frames as usize;
+            }
+            if let Some((flip_h, flip_v)) = c.orient {
+                unsafe { state.set_orient(flip_h, flip_v) };
             }
         }
         match rx.recv_timeout(Duration::from_millis(5)) {
@@ -252,12 +297,6 @@ fn run_sink(
                     *shared.error.lock().unwrap() = Some(e);
                 }
             }
-            Ok(Cmd::Rect { full, clip }) => unsafe { state.set_rect(full, clip) },
-            Ok(Cmd::Visible(v)) => unsafe {
-                let _ = ShowWindow(state.hwnd, if v { SW_SHOWNA } else { SW_HIDE });
-            },
-            Ok(Cmd::Buffer(frames)) => state.buffer_frames = frames as usize,
-            Ok(Cmd::Orient { flip_h, flip_v }) => unsafe { state.set_orient(flip_h, flip_v) },
             Ok(Cmd::Stop) | Err(RecvTimeoutError::Disconnected) => break,
             Err(RecvTimeoutError::Timeout) => {}
         }
@@ -288,13 +327,54 @@ struct HevcSeq {
     configured: bool,
 }
 
-struct SinkState {
+/// One on-screen surface: its own child window, swapchain and video processor. The device, the
+/// decoder and the decoded texture are shared — a second surface costs one blit and one present per
+/// frame (VIDEO_MULTISINK_WINDOW.md §4.2).
+struct Output {
+    /// `window/id` of the surface this output serves.
+    key: String,
+    /// The native window this output's child window hangs under. A surface can come back under a
+    /// DIFFERENT one — the detached video window is destroyed on docking and rebuilt on the next
+    /// detach — and Windows destroys a child with its parent, so the cached output would then be a
+    /// child window that no longer exists: nothing to see, and the first blit into its swapchain
+    /// fails the whole sink (which is what ended the stream). Compared before an output is reused.
+    parent: isize,
     hwnd: HWND,
+    swapchain: IDXGISwapChain1,
+    /// Video processor, cached per (in_w, in_h, out_w, out_h).
+    vp: Option<(ID3D11VideoProcessorEnumerator, ID3D11VideoProcessor, (u32, u32, u32, u32))>,
+    /// Client size of the child window = the surface's VISIBLE box.
+    client: (i32, i32),
+    /// The surface's FULL box relative to the (clip-sized) window, and its size — the video is
+    /// aspect-fitted into the full box and the window bounds cut it (a scrolled panel crops the
+    /// picture at its edge instead of shrinking it).
+    full_off: (i32, i32),
+    full_size: (i32, i32),
+    /// Still published? A surface that went away keeps its output hidden for a moment (park /
+    /// unpark, a panel scrolling past) so the picture is back on the next frame instead of after a
+    /// window + swapchain rebuild.
+    live: bool,
+    /// The child window's actual visibility — so a placement does not re-show it every frame.
+    shown: bool,
+}
+
+/// Live outputs the router may ask for at once: the widget tile plus one large surface (D1).
+const MAX_LIVE_OUTPUTS: usize = 2;
+/// Outputs kept around including hidden ones, so a park/unpark costs no rebuild.
+const MAX_CACHED_OUTPUTS: usize = 3;
+
+struct SinkState {
+    outputs: Vec<Output>,
+    /// The live keys in the order they were last stacked (highest priority last = topmost). Only
+    /// re-applied when the SET changes: a drag republishes geometry 60 times a second and re-sorting
+    /// the z-order on every one of those would be pure waste.
+    order: Vec<String>,
+    /// Kept for the swapchains of outputs created later.
+    factory: IDXGIFactory2,
     device: ID3D11Device,
     context: ID3D11DeviceContext,
     video_device: ID3D11VideoDevice,
     video_context: ID3D11VideoContext,
-    swapchain: IDXGISwapChain1,
     _dxgi_manager: IMFDXGIDeviceManager,
     decoder: IMFTransform,
     decoder_provides_samples: bool,
@@ -302,20 +382,12 @@ struct SinkState {
     hevc: HevcSeq,
     /// Non-D3D-aware MFT fallback: CPU NV12 samples uploaded into this dynamic texture.
     cpu_upload: Option<ID3D11Texture2D>,
-    /// Video processor, cached per (in_w, in_h, out_w, out_h).
-    vp: Option<(ID3D11VideoProcessorEnumerator, ID3D11VideoProcessor, (u32, u32, u32, u32))>,
     /// Coded picture size (what the decoder outputs, alignment padding included).
     picture: (u32, u32),
     /// Display aperture (x, y, w, h) within the coded picture, when the decoder reports
     /// one — HEVC pads to CTU multiples (720p decodes as 1280×736), and without this
     /// crop the padding rows would show as garbage at the picture's edge.
     display: Option<(i32, i32, i32, i32)>,
-    client: (i32, i32),
-    /// The surface's FULL box relative to the (clip-sized) window, and its size — the
-    /// video is aspect-fitted into the full box and the window bounds cut it (a scrolled
-    /// panel crops the picture at its edge instead of shrinking it).
-    full_off: (i32, i32),
-    full_size: (i32, i32),
     sample_index: u64,
     /// Decoded frames awaiting presentation (media time in 100 ns units). Only used when
     /// `buffer_frames` > 0 — the default path presents on decode. Held samples come out
@@ -329,14 +401,8 @@ struct SinkState {
 }
 
 impl SinkState {
-    unsafe fn init(
-        parent_hwnd: isize,
-        rect: (i32, i32, i32, i32),
-        codec: SinkCodec,
-    ) -> Result<Self, String> {
+    unsafe fn init(codec: SinkCodec) -> Result<Self, String> {
         unsafe {
-            let hwnd = create_child(parent_hwnd, rect)?;
-
             let mut device: Option<ID3D11Device> = None;
             let mut context: Option<ID3D11DeviceContext> = None;
             D3D11CreateDevice(
@@ -369,20 +435,6 @@ impl SinkState {
 
             let factory: IDXGIFactory2 =
                 CreateDXGIFactory1().map_err(|e| format!("CreateDXGIFactory1: {e}"))?;
-            let desc = DXGI_SWAP_CHAIN_DESC1 {
-                Width: 0,
-                Height: 0,
-                Format: DXGI_FORMAT_B8G8R8A8_UNORM,
-                SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
-                BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
-                BufferCount: 2,
-                SwapEffect: DXGI_SWAP_EFFECT_FLIP_DISCARD,
-                AlphaMode: DXGI_ALPHA_MODE_IGNORE,
-                ..Default::default()
-            };
-            let swapchain = factory
-                .CreateSwapChainForHwnd(&device, hwnd, &desc, None, None)
-                .map_err(|e| format!("CreateSwapChainForHwnd: {e}"))?;
 
             let mut reset_token = 0u32;
             let mut manager: Option<IMFDXGIDeviceManager> = None;
@@ -396,24 +448,21 @@ impl SinkState {
             let (decoder, decoder_provides_samples) = create_decoder(codec, &manager)?;
 
             Ok(Self {
-                hwnd,
+                outputs: Vec::new(),
+                order: Vec::new(),
+                factory,
                 device,
                 context,
                 video_device,
                 video_context,
-                swapchain,
                 _dxgi_manager: manager,
                 decoder,
                 decoder_provides_samples,
                 codec,
                 hevc: HevcSeq::default(),
                 cpu_upload: None,
-                vp: None,
                 picture: (0, 0),
                 display: None,
-                client: (rect.2.max(1), rect.3.max(1)),
-                full_off: (0, 0),
-                full_size: (rect.2.max(1), rect.3.max(1)),
                 sample_index: 0,
                 queue: VecDeque::new(),
                 buffer_frames: 0,
@@ -424,32 +473,165 @@ impl SinkState {
         }
     }
 
-    unsafe fn set_rect(&mut self, full: (i32, i32, i32, i32), clip: (i32, i32, i32, i32)) {
-        unsafe {
-            let (cx, cy, cw, ch) = clip;
-            let _ = SetWindowPos(
-                self.hwnd,
-                None,
-                cx,
-                cy,
-                cw.max(1),
-                ch.max(1),
-                SWP_NOZORDER | SWP_NOACTIVATE,
+    /// Reconcile the outputs with the surfaces the routers publish: create what appeared, move
+    /// what stayed, hide what went away (and drop it once the cache outgrows the router's reach).
+    unsafe fn sync_surfaces(&mut self, surfaces: &[SinkSurface]) {
+        for o in &mut self.outputs {
+            o.live = false;
+        }
+        for s in surfaces.iter().take(MAX_LIVE_OUTPUTS) {
+            if s.parent == 0 {
+                continue; // that window has no native handle registered — never guess one
+            }
+            // A cached output is only reusable while its child window is still alive under the same
+            // parent (see `Output::parent`); otherwise it is thrown away and built again.
+            let cached = self
+                .outputs
+                .iter()
+                .position(|o| o.key == s.key)
+                .filter(|&i| {
+                    self.outputs[i].parent == s.parent
+                        && unsafe { IsWindow(Some(self.outputs[i].hwnd)) }.as_bool()
+                });
+            let idx = match cached {
+                Some(i) => i,
+                None => {
+                    if let Some(i) = self.outputs.iter().position(|o| o.key == s.key) {
+                        let stale = self.outputs.remove(i);
+                        unsafe {
+                            let _ = DestroyWindow(stale.hwnd);
+                        }
+                        log::info!(
+                            "[video] sink: surface {} is in another window now — output rebuilt",
+                            s.key
+                        );
+                    }
+                    match unsafe { self.create_output(s) } {
+                        Ok(i) => i,
+                        Err(e) => {
+                            log::warn!("[video] sink: no output for surface {}: {e}", s.key);
+                            continue;
+                        }
+                    }
+                }
+            };
+            unsafe { self.place_output(idx, s) };
+            self.outputs[idx].live = true;
+        }
+        if surfaces.len() > MAX_LIVE_OUTPUTS {
+            log::debug!(
+                "[video] sink: {} surfaces published, {MAX_LIVE_OUTPUTS} served",
+                surfaces.len()
             );
+        }
+        for o in &mut self.outputs {
+            if !o.live && o.shown {
+                unsafe {
+                    let _ = ShowWindow(o.hwnd, SW_HIDE);
+                }
+                o.shown = false;
+            }
+        }
+        // Stack them the way the DOM stacks their surfaces (the router publishes highest priority
+        // FIRST, and the widget dock paints above the floating window): walking the list backwards
+        // and sending each to the bottom leaves the first entry lowest. Matters only where two
+        // surfaces overlap — a floating window dragged over the widget dock.
+        let order: Vec<String> = surfaces
+            .iter()
+            .filter(|s| self.outputs.iter().any(|o| o.key == s.key && o.live))
+            .map(|s| s.key.clone())
+            .collect();
+        if order != self.order {
+            for key in order.iter().rev() {
+                let Some(o) = self.outputs.iter().find(|o| &o.key == key) else { continue };
+                unsafe {
+                    let _ = SetWindowPos(
+                        o.hwnd,
+                        Some(HWND_BOTTOM),
+                        0,
+                        0,
+                        0,
+                        0,
+                        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+                    );
+                }
+            }
+            self.order = order;
+        }
+        while self.outputs.len() > MAX_CACHED_OUTPUTS {
+            let Some(i) = self.outputs.iter().position(|o| !o.live) else { break };
+            let o = self.outputs.remove(i);
+            unsafe {
+                let _ = DestroyWindow(o.hwnd);
+            }
+        }
+    }
+
+    /// Child window + swapchain for a surface that just appeared. Returns its index.
+    unsafe fn create_output(&mut self, s: &SinkSurface) -> Result<usize, String> {
+        unsafe {
+            let (cx, cy, cw, ch) = s.clip;
+            let hwnd = create_child(s.parent, (cx, cy, cw.max(1), ch.max(1)))?;
+            let desc = DXGI_SWAP_CHAIN_DESC1 {
+                Width: 0,
+                Height: 0,
+                Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+                BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
+                BufferCount: 2,
+                SwapEffect: DXGI_SWAP_EFFECT_FLIP_DISCARD,
+                AlphaMode: DXGI_ALPHA_MODE_IGNORE,
+                ..Default::default()
+            };
+            let swapchain = match self.factory.CreateSwapChainForHwnd(&self.device, hwnd, &desc, None, None) {
+                Ok(sc) => sc,
+                Err(e) => {
+                    let _ = DestroyWindow(hwnd);
+                    return Err(format!("CreateSwapChainForHwnd: {e}"));
+                }
+            };
+            log::info!("[video] sink: output for surface {} created", s.key);
+            self.outputs.push(Output {
+                key: s.key.clone(),
+                parent: s.parent,
+                hwnd,
+                swapchain,
+                vp: None,
+                client: (cw.max(1), ch.max(1)),
+                full_off: (0, 0),
+                full_size: (s.full.2.max(1), s.full.3.max(1)),
+                live: true,
+                shown: true, // created WS_VISIBLE
+            });
+            Ok(self.outputs.len() - 1)
+        }
+    }
+
+    /// Move / resize an existing output onto its surface and show it.
+    unsafe fn place_output(&mut self, idx: usize, s: &SinkSurface) {
+        unsafe {
+            let (cx, cy, cw, ch) = s.clip;
+            let (cw, ch) = (cw.max(1), ch.max(1));
+            let o = &mut self.outputs[idx];
+            let _ = SetWindowPos(o.hwnd, None, cx, cy, cw, ch, SWP_NOZORDER | SWP_NOACTIVATE);
             // Where the FULL box sits relative to the (clip-sized) window, and its size —
             // the blit lays the video out in the full box and lets the window bounds cut it.
-            self.full_off = (full.0 - cx, full.1 - cy);
-            self.full_size = (full.2.max(1), full.3.max(1));
-            if (cw.max(1), ch.max(1)) != (self.client.0, self.client.1) {
-                self.client = (cw.max(1), ch.max(1));
-                self.vp = None; // output size changed → rebuild the processor
-                let _ = self.swapchain.ResizeBuffers(
+            o.full_off = (s.full.0 - cx, s.full.1 - cy);
+            o.full_size = (s.full.2.max(1), s.full.3.max(1));
+            if (cw, ch) != o.client {
+                o.client = (cw, ch);
+                o.vp = None; // output size changed → rebuild the processor
+                let _ = o.swapchain.ResizeBuffers(
                     0,
-                    self.client.0 as u32,
-                    self.client.1 as u32,
+                    cw as u32,
+                    ch as u32,
                     DXGI_FORMAT_UNKNOWN,
                     DXGI_SWAP_CHAIN_FLAG(0),
                 );
+            }
+            if !o.shown {
+                let _ = ShowWindow(o.hwnd, SW_SHOWNA);
+                o.shown = true;
             }
         }
     }
@@ -662,7 +844,7 @@ impl SinkState {
                     }
                     if let Ok(size) = mt.GetUINT64(&MF_MT_FRAME_SIZE) {
                         self.picture = ((size >> 32) as u32, (size & 0xFFFF_FFFF) as u32);
-                        self.vp = None;
+                        self.invalidate_processors();
                         self.cpu_upload = None;
                     }
                     self.display = read_display_aperture(&mt);
@@ -704,7 +886,7 @@ impl SinkState {
                 .unwrap_or((1280, 720));
             if (w, h) != self.picture {
                 self.picture = (w, h);
-                self.vp = None;
+                self.invalidate_processors();
                 self.cpu_upload = None;
             }
             let mt = MFCreateMediaType().map_err(|e| e.to_string())?;
@@ -784,9 +966,10 @@ impl SinkState {
     }
 
     unsafe fn apply_orient(&self) {
-        let Some((_, processor, _)) = &self.vp else { return };
         // ID3D11VideoContext1 (D3D11.1, Win8+) — always present on the Win10+ targets.
-        if let Ok(ctx1) = self.video_context.cast::<ID3D11VideoContext1>() {
+        let Ok(ctx1) = self.video_context.cast::<ID3D11VideoContext1>() else { return };
+        for o in &self.outputs {
+            let Some((_, processor, _)) = &o.vp else { continue };
             unsafe {
                 ctx1.VideoProcessorSetStreamMirror(
                     processor,
@@ -844,8 +1027,15 @@ impl SinkState {
                 }
             };
 
-            self.blit(&texture, subresource)?;
-            let _ = self.swapchain.Present(0, DXGI_PRESENT(0));
+            // One decode, one blit + present per surface (VIDEO_MULTISINK_WINDOW.md §4.2). The
+            // counter stays per FRAME, not per surface — it is what the panel shows as fps.
+            for idx in 0..self.outputs.len() {
+                if !self.outputs[idx].live {
+                    continue;
+                }
+                self.blit(idx, &texture, subresource)?;
+                let _ = self.outputs[idx].swapchain.Present(0, DXGI_PRESENT(0));
+            }
             shared.frames_presented.fetch_add(1, Ordering::Relaxed);
             if shared.size.lock().unwrap().is_none() && self.picture.0 > 0 {
                 // Report the DISPLAY size — the aspect the surfaces size themselves to.
@@ -891,7 +1081,8 @@ impl SinkState {
     }
 
     /// NV12 → backbuffer via the video processor (convert + scale + letterbox).
-    unsafe fn blit(&mut self, texture: &ID3D11Texture2D, subresource: u32) -> Result<(), String> {
+    /// Lay the decoded texture out in output `idx`'s boxes and blit it into its swapchain.
+    unsafe fn blit(&mut self, idx: usize, texture: &ID3D11Texture2D, subresource: u32) -> Result<(), String> {
         unsafe {
             let (in_w, in_h) = if self.picture.0 > 0 {
                 self.picture
@@ -901,10 +1092,13 @@ impl SinkState {
                 texture.GetDesc(&mut desc);
                 (desc.Width, desc.Height)
             };
-            let (out_w, out_h) = (self.client.0 as u32, self.client.1 as u32);
+            let (out_w, out_h) = {
+                let o = &self.outputs[idx];
+                (o.client.0 as u32, o.client.1 as u32)
+            };
             let key = (in_w, in_h, out_w, out_h);
 
-            if self.vp.as_ref().map(|(_, _, k)| *k != key).unwrap_or(true) {
+            if self.outputs[idx].vp.as_ref().map(|(_, _, k)| *k != key).unwrap_or(true) {
                 let content = D3D11_VIDEO_PROCESSOR_CONTENT_DESC {
                     InputFrameFormat: D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE,
                     InputWidth: in_w,
@@ -924,10 +1118,10 @@ impl SinkState {
                     .map_err(|e| format!("CreateVideoProcessor: {e}"))?;
                 self.video_context
                     .VideoProcessorSetStreamFrameFormat(&processor, 0, D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE);
-                self.vp = Some((enumerator, processor, key));
+                self.outputs[idx].vp = Some((enumerator, processor, key));
                 self.apply_orient(); // a rebuilt processor starts unmirrored
             }
-            let (enumerator, processor, _) = self.vp.as_ref().unwrap();
+            let (enumerator, processor, _) = self.outputs[idx].vp.as_ref().unwrap();
 
             // Geometry, per frame (cheap stream state): letterbox from the DISPLAY size
             // (aperture crop — HEVC pads to CTU multiples and the padding must neither
@@ -939,13 +1133,17 @@ impl SinkState {
                 .display
                 .map(|(_, _, w, h)| (w as u32, h as u32))
                 .unwrap_or((in_w, in_h));
-            let (fw, fh) = (self.full_size.0 as u32, self.full_size.1 as u32);
+            let (full_off, full_size) = {
+                let o = &self.outputs[idx];
+                (o.full_off, o.full_size)
+            };
+            let (fw, fh) = (full_size.0 as u32, full_size.1 as u32);
             let fit = letterbox(disp_w, disp_h, fw.max(1), fh.max(1));
             let dest = RECT {
-                left: fit.left + self.full_off.0,
-                top: fit.top + self.full_off.1,
-                right: fit.right + self.full_off.0,
-                bottom: fit.bottom + self.full_off.1,
+                left: fit.left + full_off.0,
+                top: fit.top + full_off.1,
+                right: fit.right + full_off.0,
+                bottom: fit.bottom + full_off.1,
             };
             let vis = RECT {
                 left: dest.left.max(0),
@@ -972,7 +1170,7 @@ impl SinkState {
             self.video_context
                 .VideoProcessorSetStreamSourceRect(processor, 0, true, Some(&src));
 
-            let backbuffer: ID3D11Texture2D = self
+            let backbuffer: ID3D11Texture2D = self.outputs[idx]
                 .swapchain
                 .GetBuffer(0)
                 .map_err(|e| format!("GetBuffer: {e}"))?;
@@ -1029,9 +1227,18 @@ impl SinkState {
         }
     }
 
+    /// The input size changed — every output's processor was built for the old one.
+    fn invalidate_processors(&mut self) {
+        for o in &mut self.outputs {
+            o.vp = None;
+        }
+    }
+
     unsafe fn teardown(&mut self) {
-        unsafe {
-            let _ = DestroyWindow(self.hwnd);
+        for o in self.outputs.drain(..) {
+            unsafe {
+                let _ = DestroyWindow(o.hwnd);
+            }
         }
     }
 }
@@ -1306,9 +1513,7 @@ unsafe fn create_child(parent_raw: isize, rect: (i32, i32, i32, i32)) -> Result<
             0,
             0,
             0,
-            windows::Win32::UI::WindowsAndMessaging::SWP_NOMOVE
-                | windows::Win32::UI::WindowsAndMessaging::SWP_NOSIZE
-                | SWP_NOACTIVATE,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
         );
         Ok(child)
     }
@@ -1385,7 +1590,15 @@ mod tests {
             }
         });
         let host = hwnd_rx.recv_timeout(Duration::from_secs(5)).expect("host window");
-        let mut sink = WinVideoSink::start(host, (40, 40, 640, 400), codec).expect("sink start");
+        let mut sink = WinVideoSink::start(codec).expect("sink start");
+        // One surface in the throwaway host window — the sink creates its output from this.
+        sink.set_surfaces(&[SinkSurface {
+            key: "test/main".into(),
+            window: "test".into(),
+            parent: host,
+            full: (40, 40, 640, 400),
+            clip: (40, 40, 640, 400),
+        }]);
 
         let cfg = crate::video::rtsp::RtspConfig { url, ..Default::default() };
         let stop = Arc::new(AtomicBool::new(false));

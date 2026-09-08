@@ -40,6 +40,7 @@ use ndk::media::media_format::MediaFormat;
 use ndk::native_window::NativeWindow;
 
 use super::rtsp::VideoCodec;
+use super::surface::SinkSurface;
 use crate::android::native_video as view_host;
 
 /// How long the initial wait for a surface may take before the sink declares failure —
@@ -120,17 +121,31 @@ impl AndroidVideoSink {
         self.shared.error.lock().unwrap().clone()
     }
 
+    /// The surfaces to present into (VIDEO_MULTISINK_WINDOW.md §4.1). The phone shows the docked
+    /// window OR the widget, never both (D10), so this platform stays at ONE output: the first
+    /// entry wins and an empty list hides the view. There is only ever the main window here — the
+    /// filter keeps the contract identical to the desktop sinks.
+    pub fn set_surfaces(&self, surfaces: &[SinkSurface]) {
+        match surfaces.iter().find(|s| s.window == "main") {
+            Some(s) => {
+                self.set_rect(s.full.0, s.full.1, s.full.2, s.full.3, s.clip.0, s.clip.1, s.clip.2, s.clip.3);
+                self.set_visible(true);
+            }
+            None => self.set_visible(false),
+        }
+    }
+
     /// On-screen video rect (PHYSICAL px, window coords): the FULL box `x/y/w/h` for the
     /// aspect-fit layout plus the VISIBLE part `cx/cy/cw/ch` — the view host clips the
     /// video at that edge (scrolled panels), it never shrinks into the remainder.
     #[allow(clippy::too_many_arguments)]
-    pub fn set_rect(&self, x: i32, y: i32, w: i32, h: i32, cx: i32, cy: i32, cw: i32, ch: i32) {
+    fn set_rect(&self, x: i32, y: i32, w: i32, h: i32, cx: i32, cy: i32, cw: i32, ch: i32) {
         if let Err(e) = view_host::set_rect(x, y, w, h, cx, cy, cw, ch) {
             log::debug!("[video] android sink: set_rect: {e}");
         }
     }
 
-    pub fn set_visible(&self, visible: bool) {
+    fn set_visible(&self, visible: bool) {
         self.shared.hidden.store(!visible, Ordering::Relaxed);
         if let Err(e) = view_host::set_visible(visible) {
             log::debug!("[video] android sink: set_visible: {e}");

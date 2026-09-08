@@ -5,20 +5,20 @@
 
 <script lang="ts">
   // Video control panel on the panel framework (docs/active/PANEL_FRAMEWORK.md): a `compact`
-  // PanelShell. Header = Start/Stop; content = preview + source/resolution/mirror settings;
-  // footer = Floating Window (mode button) + Video Window/detach (button).
-  // Kept deliberately simple but extensible (more sinks/sources can slot into the content field).
+  // PanelShell. Header = Start/Stop; content = status/info lines + source/resolution/mirror
+  // settings; no footer. No preview surface either: the picture lives in the
+  // floating window (docked window on the phone) / the widget / the map swap — a started source
+  // appears there, and the window's own toggle parks it (PHONE_VIDEO.md D1 + §10).
+  // Kept deliberately simple but extensible (more sources can slot into the content field).
   import { t } from 'svelte-i18n';
   import { onMount } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import {
     videoState,
-    videoStream,
     videoRtcStats,
+    videoElFps,
     rtspBufferFrames,
-    bindVideoEl,
-    reportVideoSize,
     enumerateVideoDevices,
     toggleVideo,
     setVideoDevice,
@@ -36,12 +36,8 @@
     updateRtspConnection,
     removeRtspConnection,
     selectRtspConnection,
-    reportMjpegError,
     isWebrtcAvailable,
     type RtspTransport,
-    toggleFloating,
-    enterPiP,
-    pipSupported,
     type VideoResolution,
     type VideoKind,
     type CameraFps,
@@ -51,8 +47,7 @@
     setNativeFramerate,
     setNativeCodec,
   } from '$lib/stores/video';
-  import { canvasSink, mjpegSink, mjpegStats } from '$lib/controllers/mjpegSink';
-  import { nativeSurface, activeNativeSurface } from '$lib/controllers/nativeVideo';
+  import { canvasSink, mjpegStats } from '$lib/controllers/mjpegSink';
   import { nativeSinkFps } from '$lib/stores/video';
   import {
     codecsFor,
@@ -66,17 +61,10 @@
   import NumberStepper from '$lib/components/NumberStepper.svelte';
   import Toggle from '$lib/components/panel/Toggle.svelte';
   import { isLinux, isMobile, isAndroid, isIOS, isPhone } from '$lib/platform';
-  import VideoReconnectOverlay from '$lib/components/video/VideoReconnectOverlay.svelte';
 
-  let videoEl = $state<HTMLVideoElement | null>(null);
   // Which saved RTSP connection is being edited inline (null = none).
   let editingRtspId = $state<string | null>(null);
   const inputVal = (e: Event) => (e.currentTarget as HTMLInputElement).value;
-
-  // Bind the preview element to the shared MediaStream (camera or rtsp via captureStream).
-  $effect(() => {
-    bindVideoEl(videoEl, $videoStream);
-  });
 
   // Populate the getUserMedia device list. It is only consumed by the `camera` source; on Linux,
   // enumerating it drives WebKit's GStreamer/pipewire stack, which can hang ~35 s on an unreachable
@@ -192,65 +180,6 @@
   // Mirror can't reach Android's hardware-decoded surface (see the toggle row's comment).
   const mirrorUnavailable = $derived(isAndroid && $videoState.nativeSink);
 
-  // MJPEG FPS counter — onload fires per frame in multipart streams.
-  let mjpegFps = $state(0);
-  let _mjpegFrames = 0;
-  let _mjpegLast = performance.now();
-  // Per-frame hook of the MJPEG <img>: count for the fps meter AND report the picture size. The
-  // <video> path gets width/height from onloadedmetadata, but an <img> feed never reported it — on
-  // Linux/RTSP the info line showed dashes and the floating window kept the default 16:9 aspect even
-  // for a 3:2 stream. naturalWidth is valid from the first displayed frame. (The fps half stays
-  // engine-dependent: WebKitGTK fires load only once for a multipart image, so no rate is measurable
-  // there — the resolution is, from that single event.)
-  function mjpegFrame(e: Event): void {
-    mjpegFrameTick();
-    const img = e.currentTarget as HTMLImageElement;
-    if (img.naturalWidth) reportVideoSize(img.naturalWidth, img.naturalHeight);
-  }
-
-  function mjpegFrameTick(): void {
-    _mjpegFrames++;
-    const now = performance.now();
-    const dt = now - _mjpegLast;
-    if (dt >= 1000) {
-      mjpegFps = (_mjpegFrames * 1000) / dt;
-      _mjpegFrames = 0;
-      _mjpegLast = now;
-    }
-  }
-
-  // Measured (real) frame rate via requestVideoFrameCallback. The live flag goes through a $derived
-  // for the same reason as the enumeration above: reading `$videoState` inside the effect would make it
-  // depend on the whole store, so every unrelated patch (each reconnect-attempt tick, every widget-rect
-  // update) cancelled and re-registered the frame callback — resetting the counter each time.
-  let measuredFps = $state(0);
-  const feedLive = $derived($videoState.status === 'live');
-  $effect(() => {
-    const el = videoEl as (HTMLVideoElement & {
-      requestVideoFrameCallback?: (cb: (now: number) => void) => number;
-      cancelVideoFrameCallback?: (h: number) => void;
-    }) | null;
-    if (!el || !feedLive || !el.requestVideoFrameCallback) {
-      measuredFps = 0;
-      return;
-    }
-    let frames = 0;
-    let last = performance.now();
-    let handle = 0;
-    const tick = (now: number) => {
-      frames++;
-      const dt = now - last;
-      if (dt >= 1000) {
-        measuredFps = (frames * 1000) / dt;
-        frames = 0;
-        last = now;
-      }
-      handle = el.requestVideoFrameCallback!(tick);
-    };
-    handle = el.requestVideoFrameCallback(tick);
-    return () => el.cancelVideoFrameCallback?.(handle);
-  });
-
   const RESOLUTIONS: VideoResolution[] = ['auto', '480p', '720p', '1080p'];
   const CAMERA_FPS: CameraFps[] = ['auto', '30', '60'];
 
@@ -271,20 +200,20 @@
 
   // Info-line frame rate — each path reports it from the stage that actually knows.
   //
-  // `measuredFps` counts `requestVideoFrameCallback` on the <video>, which fires through the page's
-  // render loop: it reads 50–53 on a rock-steady 60 fps feed whenever the UI is busy, because it is
-  // measuring our own rendering, not the stream. So a WebRTC feed now takes the decoder's own rate
-  // from the inbound stats and only falls back to the sampled count where there are none (camera /
-  // getUserMedia). The MJPEG reader counts its own drawn frames, which is exact on every platform;
-  // the <img> fallback can only count where the WebView fires `load` per part (WebView2 does,
-  // WebKitGTK fires it once), hence the configured rate as a last resort.
+  // `videoElFps` counts `requestVideoFrameCallback` on a visible <video> sink (store), which fires
+  // through the page's render loop: it reads 50–53 on a rock-steady 60 fps feed whenever the UI is
+  // busy, because it is measuring our own rendering, not the stream. So a WebRTC feed takes the
+  // decoder's own rate from the inbound stats and only falls back to the sampled count where there
+  // are none (camera / getUserMedia). The MJPEG reader counts its own drawn frames, which is exact on
+  // every platform; the <img> fallback (WebKitGTK, which fires `load` once per multipart image) has no
+  // countable rate, hence the configured rate as a last resort.
   const fpsText = $derived.by(() => {
     const s = $videoState;
     // Native decode sink: the backend counts what it actually presents (1 Hz poll).
     if (s.nativeSink) return $nativeSinkFps ? $nativeSinkFps.toFixed(0) : '–';
-    const drawn = $canvasSink ? ($mjpegStats?.fpsOut ?? 0) : mjpegFps;
+    const drawn = $canvasSink ? ($mjpegStats?.fpsOut ?? 0) : 0;
     if (s.kind === 'native' && s.mjpegUrl) return drawn ? drawn.toFixed(0) : String(s.nativeSel.fps);
-    const cur = s.mjpegUrl ? drawn : ($videoRtcStats?.decodeFps ?? measuredFps);
+    const cur = s.mjpegUrl ? drawn : ($videoRtcStats?.decodeFps ?? $videoElFps);
     const curStr = cur ? cur.toFixed(0) : '–';
     return s.frameRate ? `${curStr}/${Math.round(s.frameRate)}` : curStr;
   });
@@ -371,70 +300,51 @@
 
 {#snippet body()}
   <div class="vp-body">
-    <!-- Phone (PHONE_VIDEO.md D1): no preview in the panel — the docked window / widget is the
-         picture; the panel is settings only. -->
-    {#if !isPhone}
-    <div class="preview" class:nv-active={$activeNativeSurface === 'preview'} style="aspect-ratio: {$videoState.aspect};">
-      {#if $videoState.nativeSink && $videoState.status === 'live'}
-        <!-- Native decode sink (hole punch): the video is a hardware layer BELOW the WebView; this
-             div is the transparent hole it shows through. Lowest surface priority — a flight
-             surface (floating window / widget) takes the picture over this preview. -->
-        <div class="native-hole" class:armed={$activeNativeSurface === 'preview'} use:nativeSurface={'preview'}>
-          {#if $activeNativeSurface !== 'preview'}<span>{$t('video.sinkElsewhere')}</span>{/if}
-        </div>
-      {:else if $videoState.mjpegUrl}
-        <!-- MJPEG multipart feed — off-thread reader where the WebView allows it, else an <img>
-             whose per-part `load` carries both the frame count and the picture size. -->
-        {#if $canvasSink}
-          <canvas use:mjpegSink class:mirror={$videoState.mirror} class:rot180={$videoState.rotate180}></canvas>
+    <!-- No preview surface (PHONE_VIDEO.md D1, desktop since §10): the picture is in the floating /
+         docked window or the widget. What the preview used to say about a source that is not live
+         is said here instead. -->
+    <!-- Status block — the room the preview left goes to what the user looks for first: the state
+         of the source, then resolution / fps / codec / bitrate as readable tiles. -->
+    <div class="vp-status" class:live={$videoState.status === 'live'} class:starting={$videoState.status === 'starting'} class:error={$videoState.status === 'error'}>
+      <div class="vp-state">
+        <span class="state-dot"></span>
+        {#if $videoState.status === 'live'}
+          {$t('video.live')}
+        {:else if $videoState.status === 'starting'}
+          {$t('video.starting')}
+        {:else if $videoState.status === 'error'}
+          ⚠ {$videoState.error}
         {:else}
-          <!-- svelte-ignore a11y_missing_attribute -->
-          <img
-            src={$videoState.mjpegUrl}
-            alt="Live video"
-            class:mirror={$videoState.mirror} class:rot180={$videoState.rotate180}
-            onload={mjpegFrame}
-            onerror={reportMjpegError}
-          />
+          {$t('video.off')}
         {/if}
-      {:else}
-        <!-- svelte-ignore a11y_media_has_caption -->
-        <video
-          bind:this={videoEl}
-          autoplay
-          muted
-          playsinline
-          class:mirror={$videoState.mirror} class:rot180={$videoState.rotate180}
-          class:hidden={$videoState.status !== 'live'}
-          onloadedmetadata={(e) => reportVideoSize(e.currentTarget.videoWidth, e.currentTarget.videoHeight)}
-          onerror={() => console.error('[video] element error', videoEl?.error?.code, videoEl?.error?.message)}
-          onloadeddata={() => console.log('[video] loadeddata, readyState', videoEl?.readyState)}
-          onstalled={() => console.warn('[video] stalled')}
-          onwaiting={() => console.warn('[video] waiting/buffering')}
-        ></video>
-      {/if}
-      {#if $videoState.status !== 'live' && !$videoState.mjpegUrl}
-        <div class="preview-placeholder">
-          {#if $videoState.status === 'starting'}
-            {$t('video.starting')}
-          {:else if $videoState.status === 'error'}
-            ⚠ {$videoState.error}
-          {:else}
-            {$t('video.off')}
+      </div>
+      {#if $videoState.status === 'live'}
+        <div class="vp-tiles">
+          <div class="tile">
+            <span class="val">{$videoState.width ?? '–'}×{$videoState.height ?? '–'}</span>
+            <span class="lbl">{$t('video.resolution')}</span>
+          </div>
+          <div class="tile">
+            <span class="val">{fpsText}</span>
+            <span class="lbl">{$t('video.framerate')}</span>
+          </div>
+          {#if streamCodec}
+            <div class="tile">
+              <span class="val">{streamCodec}</span>
+              <span class="lbl">{$t('video.codec')}</span>
+            </div>
+          {/if}
+          {#if streamBitrate}
+            <div class="tile">
+              <span class="val">{streamBitrate}</span>
+              <span class="lbl">{$t('video.bitrate')}</span>
+            </div>
           {/if}
         </div>
       {/if}
-      <VideoReconnectOverlay />
     </div>
-    {/if}
 
     {#if $videoState.status === 'live'}
-      <div class="info-line">
-        {$videoState.width ?? '–'}×{$videoState.height ?? '–'}
-        · {fpsText} fps
-        {#if streamCodec}· {streamCodec}{/if}
-        {#if streamBitrate}· {streamBitrate}{/if}
-      </div>
       {#if pipeline}
         <div class="pipeline-line" class:sw={!pipeline.transcodeHw}>
           <span class="pl-dot"></span>
@@ -782,95 +692,70 @@
   </div>
 {/snippet}
 
-{#snippet footer()}
-  <div class="vp-footer">
-    <!-- Floating window: a mode button (active = on) — can be toggled off from here. Not on the
-         phone: the docked window has its own button next to the map controls (PHONE_VIDEO.md D3). -->
-    {#if !isPhone}
-      <Button variant="mode" active={$videoState.floating} onclick={() => toggleFloating()}>
-        {$t('video.floatingWindow')}
-      </Button>
-    {/if}
-    <!-- Detached PiP window: a one-way action (can't be closed from inside the app) → plain button.
-         PiP is bound to a <video>/MediaStream, so it can't carry an MJPEG (<img>) feed → disabled then. -->
-    {#if pipSupported}
-      <Button
-        variant="standard"
-        disabled={$videoState.status !== 'live' || !!$videoState.mjpegUrl}
-        onclick={enterPiP}
-      >
-        {$t('video.videoWindow')}
-      </Button>
-    {/if}
-  </div>
-{/snippet}
-
 <div class="vpv2">
-  <PanelShell variant="compact" title={$t('video.title')} {headerActions} {body} {footer} />
+  <PanelShell variant="compact" title={$t('video.title')} {headerActions} {body} />
 </div>
 
 <style>
   .vp-body { display: flex; flex-direction: column; gap: 12px; }
 
-  .preview {
-    width: 100%;
-    background: #000;
-    border: 1px solid rgba(255, 255, 255, 0.12);
+  /* Status block: state line (dot = off grey / starting amber / live green / error red) + the
+     stream facts as tiles — the panel's headline now that there is no preview. */
+  .vp-status {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .vp-state {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 14px;
+    font-weight: 600;
+    color: #cfcfcf;
+  }
+  .state-dot {
+    flex: 0 0 auto;
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    background: #949494;
+  }
+  .vp-status.live .state-dot { background: #59aa29; box-shadow: 0 0 6px rgba(89, 170, 41, 0.7); }
+  .vp-status.live .vp-state { color: #e0e0e0; }
+  .vp-status.starting .state-dot { background: #e0a53c; }
+  .vp-status.error .state-dot { background: #d40000; }
+  .vp-status.error .vp-state { color: #ff6b6b; font-weight: 500; }
+  .vp-status:not(.live):not(.error) .vp-state { font-weight: 500; }
+  .vp-tiles {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(84px, 1fr));
+    gap: 6px;
+  }
+  .tile {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 6px 8px;
+    background: rgba(0, 0, 0, 0.25);
+    border: 1px solid rgba(255, 255, 255, 0.06);
     border-radius: 6px;
-    overflow: hidden;
-    position: relative;
-    display: flex;
-    align-items: center;
-    justify-content: center;
+    min-width: 0;
   }
-  /* will-change: own compositing layer — see VideoWidget: keeps the 60 fps MJPEG <img> from
-     dirtying shared layer tiles every frame on WebKitGTK. */
-  .preview video { width: 100%; height: 100%; object-fit: contain; display: block; will-change: transform; }
-  .preview video.mirror { transform: scaleX(-1); }
-  .preview video.rot180 { transform: rotate(180deg); }
-  .preview video.mirror.rot180 { transform: scaleY(-1); }
-  .preview video.hidden { visibility: hidden; }
-  .preview img,
-  .preview canvas { width: 100%; height: 100%; object-fit: contain; display: block; will-change: transform; }
-  .preview img.mirror,
-  .preview canvas.mirror { transform: scaleX(-1); }
-  .preview img.rot180,
-  .preview canvas.rot180 { transform: rotate(180deg); }
-  .preview img.mirror.rot180,
-  .preview canvas.mirror.rot180 { transform: scaleY(-1); }
-  /* Native-sink hole: the preview stops painting while it holds the hardware video layer. */
-  .preview.nv-active { background: transparent; }
-  .native-hole {
-    width: 100%;
-    height: 100%;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    color: #888;
-    font-size: 12px;
-    text-align: center;
-    background: #000;
-    /* Matches .preview's rounding — the surface router cuts the hole with this radius. */
-    border-radius: 6px;
-  }
-  .native-hole.armed { background: transparent; }
-  .preview-placeholder {
-    position: absolute;
-    inset: 0;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    color: #888;
-    font-size: 12px;
-    text-align: center;
-    padding: 0 10px;
-  }
-  .info-line {
-    font-size: 11px;
+  .tile .val {
+    font-size: 15px;
+    font-weight: 600;
     color: #9ad0e8;
     font-variant-numeric: tabular-nums;
-    margin-top: -6px;
-    letter-spacing: 0.02em;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .tile .lbl {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: #949494;
   }
   /* Diagnostic pipeline readout: dot + method + a HW/SW badge. Green = hardware-composited <video>
      (getUserMedia / engine-WebRTC); amber = the software ffmpeg→MJPEG <img> fallback. */
@@ -1025,5 +910,4 @@
   .dl-fill { height: 100%; background: #37a8db; transition: width 0.2s ease; }
   .dl-pct { font-size: 11px; color: #9ad0e8; font-variant-numeric: tabular-nums; min-width: 30px; text-align: right; }
 
-  .vp-footer { display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%; }
 </style>

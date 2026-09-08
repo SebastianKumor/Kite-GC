@@ -20,6 +20,7 @@
 
 use std::io::Read;
 use std::net::TcpListener;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
@@ -28,12 +29,15 @@ use std::time::{Duration, Instant};
 
 use super::mjpeg_server::{accept_loop, broadcast_loop, Client, EndedHook};
 use super::rtsp::{run_rtsp, LiveRtspStats, RtspConfig, RtspTransport, VideoCodec};
+use super::surface::{SinkSurface, SurfaceRect};
 #[cfg(target_os = "android")]
 use super::android_sink::AndroidVideoSink;
 #[cfg(target_os = "windows")]
 use super::win_sink::{SinkCodec, WinVideoSink};
 #[cfg(target_os = "linux")]
 use super::linux_sink::LinuxVideoSink;
+#[cfg(target_os = "macos")]
+use super::apple_sink::AppleVideoSink;
 
 /// The per-OS decode sink behind the shared routing below — same method surface on all
 /// three (start's signature differs and is branched at the one call site).
@@ -43,6 +47,8 @@ type PlatformSink = WinVideoSink;
 type PlatformSink = AndroidVideoSink;
 #[cfg(target_os = "linux")]
 type PlatformSink = LinuxVideoSink;
+#[cfg(target_os = "macos")]
+type PlatformSink = AppleVideoSink;
 
 /// How long `start()` waits for the first frame: RTSP negotiation (incl. a possible 2 s
 /// UDP→TCP fallback) plus the first JPEG.
@@ -104,14 +110,14 @@ pub enum Started {
 }
 
 /// RTP 32-bit timestamp → monotonic 64-bit 90 kHz ticks for the sink's sample times.
-#[cfg(any(target_os = "windows", target_os = "android", target_os = "linux"))]
+#[cfg(any(target_os = "windows", target_os = "android", target_os = "linux", target_os = "macos"))]
 #[derive(Default)]
 struct SinkTs {
     unwrapped: u64,
     last: Option<u32>,
 }
 
-#[cfg(any(target_os = "windows", target_os = "android", target_os = "linux"))]
+#[cfg(any(target_os = "windows", target_os = "android", target_os = "linux", target_os = "macos"))]
 impl SinkTs {
     fn unwrap(&mut self, ts: u32) -> u64 {
         if let Some(prev) = self.last {
@@ -128,13 +134,20 @@ pub struct NativeRtsp {
     /// The active decode sink, when the stream selected that route. Lives on `self` (not
     /// in `Running`) so the rect/visibility commands can reach it without teardown
     /// plumbing; cleared together with the stream.
-    #[cfg(any(target_os = "windows", target_os = "android", target_os = "linux"))]
+    #[cfg(any(target_os = "windows", target_os = "android", target_os = "linux", target_os = "macos"))]
     sink: Arc<Mutex<Option<PlatformSink>>>,
     /// Which codec the active sink decodes ("H.264"/"H.265"), for the start verdict.
-    #[cfg(any(target_os = "windows", target_os = "android", target_os = "linux"))]
+    #[cfg(any(target_os = "windows", target_os = "android", target_os = "linux", target_os = "macos"))]
     sink_codec: Arc<Mutex<Option<&'static str>>>,
     /// Live counters of the running stream (fresh per start) — the Debug Monitor's feed.
     live: Mutex<Option<Arc<LiveRtspStats>>>,
+    /// What each window's surface router last published, keyed by window label. The sink always
+    /// gets the MERGED list, so one window's push can never drop another window's holes
+    /// (VIDEO_MULTISINK_WINDOW.md §4.1).
+    surfaces: Mutex<HashMap<String, Vec<SurfaceRect>>>,
+    /// Native parent window handle per window label — Windows parents its child surface windows to
+    /// it. Seeded with the main window at `start`; the detached video window registers its own.
+    parents: Mutex<HashMap<String, isize>>,
 }
 
 struct Running {
@@ -177,6 +190,10 @@ impl NativeRtsp {
         parent_hwnd: Option<isize>,
     ) -> Result<Started, String> {
         self.stop();
+        // The main window hosts every surface until the detached video window registers itself.
+        if let Some(h) = parent_hwnd {
+            self.parents.lock().unwrap().insert("main".to_string(), h);
+        }
 
         let listener = TcpListener::bind("127.0.0.1:0").map_err(|e| format!("bind: {e}"))?;
         listener
@@ -190,14 +207,14 @@ impl NativeRtsp {
         } else {
             vec![VideoCodec::Mjpeg]
         };
-        // Android and Linux need no window handle — their sinks reach a host installed at
-        // startup (the SurfaceView over JNI / the GTK layer under the WebView).
-        #[cfg(any(target_os = "android", target_os = "linux"))]
+        // Android, Linux and macOS need no window handle — their sinks reach a host installed at
+        // startup (the SurfaceView over JNI / the GTK layer / the AppKit view under the WebView).
+        #[cfg(any(target_os = "android", target_os = "linux", target_os = "macos"))]
         let accept = {
             let _ = parent_hwnd;
             vec![VideoCodec::Mjpeg, VideoCodec::H264, VideoCodec::H265]
         };
-        #[cfg(not(any(target_os = "windows", target_os = "android", target_os = "linux")))]
+        #[cfg(not(any(target_os = "windows", target_os = "android", target_os = "linux", target_os = "macos")))]
         let accept = {
             let _ = parent_hwnd;
             vec![VideoCodec::Mjpeg]
@@ -245,15 +262,15 @@ impl NativeRtsp {
         let rtsp = {
             let stop = stop.clone();
             let error_slot = error_slot.clone();
-            #[cfg(any(target_os = "windows", target_os = "android", target_os = "linux"))]
+            #[cfg(any(target_os = "windows", target_os = "android", target_os = "linux", target_os = "macos"))]
             let sink_slot = self.sink.clone();
-            #[cfg(any(target_os = "windows", target_os = "android", target_os = "linux"))]
+            #[cfg(any(target_os = "windows", target_os = "android", target_os = "linux", target_os = "macos"))]
             let sink_codec_slot = self.sink_codec.clone();
             thread::spawn(move || {
                 let mut first = true;
-                #[cfg(not(any(target_os = "windows", target_os = "android", target_os = "linux")))]
+                #[cfg(not(any(target_os = "windows", target_os = "android", target_os = "linux", target_os = "macos")))]
                 let _ = &sink_first;
-                #[cfg(any(target_os = "windows", target_os = "android", target_os = "linux"))]
+                #[cfg(any(target_os = "windows", target_os = "android", target_os = "linux", target_os = "macos"))]
                 let mut sink_ts: Option<SinkTs> = None;
                 #[cfg(target_os = "linux")]
                 let mut aus_without_sps = 0u32;
@@ -264,7 +281,7 @@ impl NativeRtsp {
                         first = false;
                         let _ = frame_tx.send(part);
                     }
-                    #[cfg(any(target_os = "windows", target_os = "android", target_os = "linux"))]
+                    #[cfg(any(target_os = "windows", target_os = "android", target_os = "linux", target_os = "macos"))]
                     VideoCodec::H264 | VideoCodec::H265 => {
                         // Linux decides its HEVC route from the SPS: hold the start until an
                         // AU carries one (the depacketizer prepends the sets before an IRAP;
@@ -292,17 +309,23 @@ impl NativeRtsp {
                             };
                             #[cfg(target_os = "windows")]
                             let started_sink = {
-                                let Some(parent) = parent_hwnd else { return };
+                                // Each surface brings the window it is parented to, so the sink
+                                // needs no handle here — only the route's presence check.
+                                if parent_hwnd.is_none() {
+                                    return;
+                                }
                                 let sink_codec = match frame.codec {
                                     VideoCodec::H265 => SinkCodec::H265,
                                     _ => SinkCodec::H264,
                                 };
-                                WinVideoSink::start(parent, (0, 0, 1, 1), sink_codec)
+                                WinVideoSink::start(sink_codec)
                             };
                             #[cfg(target_os = "android")]
                             let started_sink = AndroidVideoSink::start(frame.codec);
                             #[cfg(target_os = "linux")]
                             let started_sink = LinuxVideoSink::start(frame.codec, sps);
+                            #[cfg(target_os = "macos")]
+                            let started_sink = AppleVideoSink::start(frame.codec);
                             match started_sink {
                                 Ok(sink) => {
                                     *sink_slot.lock().unwrap() = Some(sink);
@@ -334,7 +357,7 @@ impl NativeRtsp {
                         }
                     }
                     // Not on the accept list — the client never selects such a track.
-                    #[cfg(not(any(target_os = "windows", target_os = "android", target_os = "linux")))]
+                    #[cfg(not(any(target_os = "windows", target_os = "android", target_os = "linux", target_os = "macos")))]
                     _ => {}
                 });
                 match result {
@@ -382,7 +405,7 @@ impl NativeRtsp {
         };
         if let Some(mut msg) = failure {
             teardown(Running { stop, shutdown, rtsp, broadcast, accept });
-            #[cfg(any(target_os = "windows", target_os = "android", target_os = "linux"))]
+            #[cfg(any(target_os = "windows", target_os = "android", target_os = "linux", target_os = "macos"))]
             drop(self.sink.lock().unwrap().take());
             // The RTSP thread may have written the real reason while we were giving up.
             if let Some(e) = error_slot.lock().ok().and_then(|s| s.clone()) {
@@ -393,7 +416,7 @@ impl NativeRtsp {
         }
 
         let started = {
-            #[cfg(any(target_os = "windows", target_os = "android", target_os = "linux"))]
+            #[cfg(any(target_os = "windows", target_os = "android", target_os = "linux", target_os = "macos"))]
             {
                 if self.sink.lock().unwrap().is_some() {
                     Started::Sink {
@@ -403,7 +426,7 @@ impl NativeRtsp {
                     Started::Mjpeg { port }
                 }
             }
-            #[cfg(not(any(target_os = "windows", target_os = "android", target_os = "linux")))]
+            #[cfg(not(any(target_os = "windows", target_os = "android", target_os = "linux", target_os = "macos")))]
             Started::Mjpeg { port }
         };
         match &started {
@@ -418,6 +441,9 @@ impl NativeRtsp {
             .lock()
             .unwrap()
             .replace(Running { stop, shutdown, rtsp, broadcast, accept });
+        // The sink was created mid-stream by the RTSP thread and knows nothing about the surfaces
+        // the routers published before that — hand it the current list instead of waiting a frame.
+        self.push_surfaces();
         Ok(started)
     }
 
@@ -429,7 +455,7 @@ impl NativeRtsp {
             log::info!("[video] native RTSP client stopped");
         }
         // After the joins: the RTSP thread pushed into the sink, so it must be gone first.
-        #[cfg(any(target_os = "windows", target_os = "android", target_os = "linux"))]
+        #[cfg(any(target_os = "windows", target_os = "android", target_os = "linux", target_os = "macos"))]
         {
             drop(self.sink.lock().unwrap().take());
             *self.sink_codec.lock().unwrap() = None;
@@ -449,7 +475,7 @@ impl NativeRtsp {
             _ => None,
         };
         let sink = {
-            #[cfg(any(target_os = "windows", target_os = "android", target_os = "linux"))]
+            #[cfg(any(target_os = "windows", target_os = "android", target_os = "linux", target_os = "macos"))]
             {
                 self.sink.lock().unwrap().as_ref().map(|s| {
                     let size = s.picture_size();
@@ -469,7 +495,7 @@ impl NativeRtsp {
                     })
                 })
             }
-            #[cfg(not(any(target_os = "windows", target_os = "android", target_os = "linux")))]
+            #[cfg(not(any(target_os = "windows", target_os = "android", target_os = "linux", target_os = "macos")))]
             None::<serde_json::Value>
         };
         Some(serde_json::json!({
@@ -486,55 +512,97 @@ impl NativeRtsp {
         }))
     }
 
-    /// Forward the on-screen video rect (PHYSICAL px, main-window client coords) to the
-    /// active decode sink: full box `x/y/w/h` for the video layout, visible part
-    /// `cx/cy/cw/ch` after scroll-container clipping — both sinks lay the video out in
-    /// the full box and CUT it at the visible edge (a scrolled panel crops the picture,
-    /// it never shrinks it). No-op without a sink (MJPEG route, other OS, stopped).
-    #[allow(clippy::too_many_arguments)]
-    pub fn sink_rect(&self, x: i32, y: i32, w: i32, h: i32, cx: i32, cy: i32, cw: i32, ch: i32) {
-        #[cfg(any(target_os = "windows", target_os = "android", target_os = "linux"))]
-        if let Some(s) = self.sink.lock().unwrap().as_ref() {
-            s.set_rect(x, y, w, h, cx, cy, cw, ch);
-        }
-        #[cfg(not(any(target_os = "windows", target_os = "android", target_os = "linux")))]
-        let _ = (x, y, w, h, cx, cy, cw, ch);
+    /// Windows only: the AppKit and GTK hosts find a window by its Tauri LABEL, so only the
+    /// Windows sink — which parents a child window to a native handle — needs this.
+    #[cfg(target_os = "windows")]
+    /// Register `window`'s native handle so surfaces published from it can be hosted
+    /// (VIDEO_MULTISINK_WINDOW.md §5.1). Called when the detached video window is created — before
+    /// its page can publish anything, so its first surface list already resolves to a parent.
+    pub fn register_window(&self, window: &str, parent: isize) {
+        self.parents
+            .lock()
+            .unwrap()
+            .insert(window.to_string(), parent);
     }
 
-    /// Show/hide the decode sink's native layer (no DOM surface wants it right now).
-    pub fn sink_visible(&self, visible: bool) {
-        #[cfg(any(target_os = "windows", target_os = "android", target_os = "linux"))]
-        if let Some(s) = self.sink.lock().unwrap().as_ref() {
-            s.set_visible(visible);
+    #[cfg(desktop)]
+    /// A window is gone: drop its handle and everything it published. Without this a destroyed
+    /// window's holes would keep an output alive over a parent that no longer exists.
+    pub fn forget_window(&self, window: &str) {
+        self.parents.lock().unwrap().remove(window);
+        self.surfaces.lock().unwrap().remove(window);
+        self.push_surfaces();
+    }
+
+    /// Replace `window`'s published surfaces (VIDEO_MULTISINK_WINDOW.md §4.1) and hand the sink the
+    /// merged list. An empty list means that window shows nothing — visibility is implicit, so
+    /// there is no second command that could arrive out of order.
+    pub fn sink_surfaces(&self, window: &str, rects: Vec<SurfaceRect>) {
+        {
+            let mut all = self.surfaces.lock().unwrap();
+            if rects.is_empty() {
+                all.remove(window);
+            } else {
+                all.insert(window.to_string(), rects);
+            }
         }
-        #[cfg(not(any(target_os = "windows", target_os = "android", target_os = "linux")))]
-        let _ = visible;
+        self.push_surfaces();
+    }
+
+    /// Resolve every published surface against its window and hand the list to the active sink.
+    /// Surfaces whose window has no native handle yet are dropped rather than guessed.
+    fn push_surfaces(&self) {
+        #[cfg(any(target_os = "windows", target_os = "android", target_os = "linux", target_os = "macos"))]
+        {
+            let merged: Vec<SinkSurface> = {
+                let all = self.surfaces.lock().unwrap();
+                let parents = self.parents.lock().unwrap();
+                // The main window first, then the others by label: a HashMap iterates in an
+                // arbitrary order, and the sink serves the FIRST entries — which window keeps its
+                // picture must not depend on that.
+                let mut windows: Vec<&String> = all.keys().collect();
+                windows.sort_by_key(|w| (w.as_str() != "main", w.as_str()));
+                windows
+                    .into_iter()
+                    .flat_map(|win| {
+                        let parent = parents.get(win).copied().unwrap_or(0);
+                        all[win]
+                            .iter()
+                            .map(move |r| SinkSurface::new(win, parent, r))
+                    })
+                    .collect()
+            };
+            if let Some(s) = self.sink.lock().unwrap().as_ref() {
+                s.set_surfaces(&merged);
+            }
+        }
     }
 
     /// Smoothing-buffer depth for the decode sink (frames, 0 = present on decode).
     pub fn sink_buffer(&self, frames: u32) {
-        #[cfg(any(target_os = "windows", target_os = "android", target_os = "linux"))]
+        #[cfg(any(target_os = "windows", target_os = "android", target_os = "linux", target_os = "macos"))]
         if let Some(s) = self.sink.lock().unwrap().as_ref() {
             s.set_buffer(frames);
         }
-        #[cfg(not(any(target_os = "windows", target_os = "android", target_os = "linux")))]
+        #[cfg(not(any(target_os = "windows", target_os = "android", target_os = "linux", target_os = "macos")))]
         let _ = frames;
     }
 
     /// Horizontal mirror / 180° rotation of the decode sink's picture.
     pub fn sink_orient(&self, mirror: bool, rotate180: bool) {
-        #[cfg(any(target_os = "windows", target_os = "android", target_os = "linux"))]
+        #[cfg(any(target_os = "windows", target_os = "android", target_os = "linux", target_os = "macos"))]
         if let Some(s) = self.sink.lock().unwrap().as_ref() {
             s.set_orient(mirror, rotate180);
         }
-        #[cfg(not(any(target_os = "windows", target_os = "android", target_os = "linux")))]
+        #[cfg(not(any(target_os = "windows", target_os = "android", target_os = "linux", target_os = "macos")))]
         let _ = (mirror, rotate180);
     }
 
     /// `(frames_presented, picture_size, error)` of the active decode sink; `None` while
-    /// no sink runs. The frontend polls this for aspect ratio, fps and stall detection.
+    /// no sink runs. Test hook for the Windows/Linux sink end-to-end tests — nothing in the app polls it.
+    #[cfg(all(test, any(target_os = "windows", target_os = "linux")))]
     pub fn sink_stats(&self) -> Option<(u64, Option<(u32, u32)>, Option<String>)> {
-        #[cfg(any(target_os = "windows", target_os = "android", target_os = "linux"))]
+        #[cfg(any(target_os = "windows", target_os = "android", target_os = "linux", target_os = "macos"))]
         {
             self.sink
                 .lock()
@@ -542,7 +610,7 @@ impl NativeRtsp {
                 .as_ref()
                 .map(|s| (s.frames_presented(), s.picture_size(), s.error()))
         }
-        #[cfg(not(any(target_os = "windows", target_os = "android", target_os = "linux")))]
+        #[cfg(not(any(target_os = "windows", target_os = "android", target_os = "linux", target_os = "macos")))]
         None
     }
 }
@@ -674,7 +742,20 @@ mod tests {
             matches!(started, Started::Sink { .. }),
             "expected the H264 decode-sink route for this source"
         );
-        server.sink_rect(40, 40, 640, 400, 40, 40, 640, 400);
+        server.sink_surfaces(
+            "main",
+            vec![SurfaceRect {
+                id: "main".into(),
+                x: 40,
+                y: 40,
+                w: 640,
+                h: 400,
+                cx: 40,
+                cy: 40,
+                cw: 640,
+                ch: 400,
+            }],
+        );
         std::thread::sleep(Duration::from_secs(6));
         let (presented, size, err) = server.sink_stats().expect("sink stats");
         eprintln!("presented={presented} size={size:?} err={err:?}");
