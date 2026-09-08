@@ -25,9 +25,11 @@
 //   main  → video : `video-detached-state`     { status, error, aspect, nativeSink, reconnect }
 //   video → main  : `video-detached-ready`     (mounted — send me the state)
 //                   `video-detached-geometry`  the box to remember (physical px)
-//                   `video-detached-closed`    emitted by the BACKEND on destroy (its own button,
-//                                              Alt+F4, or our close) — the picture docks back in
-//                                              unless we were the one closing it.
+//                   `video-detached-dock`      the viewer's dock button: take the picture back. The
+//                                              window is still ALIVE here — the reconciler closes it,
+//                                              which is what stops its video before the widgets die.
+//                   `video-detached-closed`    emitted by the BACKEND once the window is really gone
+//                                              (Alt+F4, or our own close).
 
 import { get } from 'svelte/store';
 import { invoke } from '@tauri-apps/api/core';
@@ -72,6 +74,7 @@ let lastPushed = '';
 export function startDetachedVideo(): void {
   if (unsubscribe) return;
   void listen(`video-detached-closed`, onClosed).then((u) => unlisteners.push(u));
+  void listen('video-detached-dock', onDockRequest).then((u) => unlisteners.push(u));
   void listen('video-detached-ready', () => pushState(get(videoState), true)).then((u) => unlisteners.push(u));
   void listen<DetachBox>('video-detached-geometry', (e) => setDetachBox(e.payload)).then((u) => unlisteners.push(u));
   unsubscribe = videoState.subscribe(reconcile);
@@ -144,6 +147,14 @@ async function closeWindow(): Promise<void> {
       reconcile(get(videoState));
     }, 2000);
   }
+}
+
+/** The viewer's dock button. The window is still there, so `windowOpen` stays true and the
+ *  reconciler does the closing — in the right order, which is the whole point (the window's own
+ *  video has to stop before GTK takes its widgets down). */
+function onDockRequest(): void {
+  setUndocked(false);
+  reconcile(get(videoState));
 }
 
 /** The window is gone. Ours → keep the wish (a restarted source detaches again); the user's → dock

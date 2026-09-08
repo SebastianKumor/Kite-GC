@@ -136,9 +136,9 @@ The same feed can appear in several places at once (they all share one stream):
   It **can't host the map** (double-click does nothing there), and where it stands — including
   fullscreen — is remembered: quit while detached and it comes back detached, on the same screen. If
   that screen is gone, it opens at a default size on Kite's own screen.
-  Requires the **Native RTSP client** and, for now, **Windows** — see the
-  [platform notes](#platform-notes-what-to-expect-per-operating-system); the button is simply absent
-  elsewhere.
+  Requires the **Native RTSP client** — on **Windows**, **macOS** and **Linux**; the
+  [platform notes](#platform-notes-what-to-expect-per-operating-system) say what a Wayland desktop
+  does differently.
 
 ![The floating video window and the video widget](../assets/guides/video/video_floating_widget.png)
 /// caption
@@ -206,7 +206,7 @@ macOS browser engine is the only one that accepts HEVC on that path), and the **
 toggle switches to Kite's own client: H.264 and HEVC are decoded by the system's VideoToolbox and
 drawn straight into the video area — no helper programs, UDP-first with TCP fallback, mirror and
 rotate live. Either route is fine; the native one skips the helper download and the local relay leg.
-The detached video window is not available on macOS yet.
+The detached video window works here too, and so does showing the picture in two places at once.
 
 **On Linux, switch on the *Native RTSP client* for network streams.** With that toggle (Video panel →
 RTSP section) Kite plays RTSP itself: **H.264 and HEVC go straight into the machine's hardware
@@ -219,6 +219,8 @@ not hold 50 fps. MJPEG sources are passed through untouched, as always. The clie
 distribution's GStreamer plugins (the **.deb** installs them automatically; elsewhere:
 `gstreamer1.0-plugins-base`, `…-good`, `…-bad`, `gstreamer1.0-gtk3` and `gstreamer1.0-libav`, or your
 distro's equivalents) — if one is missing, Kite reports which GStreamer element it could not find.
+Showing the picture in **two places at once** and the **detached video window** both work on this
+route; the notes below say what each of them costs.
 
 !!! note "Raspberry Pi 5 and HEVC"
     Encoders that pad the picture height to their block size — NVENC at 720p codes 736 rows, every
@@ -273,9 +275,16 @@ cannot fix from its side on that classic path:
   Kite works around the worst cases (it caps the automatic resolution and frame rate, and routes the
   advanced capture path around that layer entirely), but a camera the system itself can't open cleanly
   is out of reach.
-- **The detached video window is Windows-only for now.** On Linux and macOS the video layer Kite
-  draws the picture on lives in the main window, so a second window has nowhere to put it yet. All
-  the in-app surfaces (widget, floating window, full-screen swap) work everywhere.
+- **The detached video window works, but it cannot stay on top of everything on Wayland.** Current
+  desktops that run on Wayland — GNOME's default — do not let an application put its own window
+  above other applications, so the detached window takes its turn in the normal stacking order
+  there. Put it on a second monitor or beside Kite and it stays where you want it. The window also
+  decodes the picture for itself (a window cannot borrow another window's hardware video surface),
+  so it costs a second hardware decode of the same stream.
+- **The picture in two places at once costs a conversion.** The second place is drawn by the
+  processor rather than the graphics chip (two hardware-accelerated surfaces cannot share one
+  pipeline), which on a desktop costs a few percent of one core for a widget-sized tile. All the
+  in-app surfaces (widget, floating window, full-screen swap) work everywhere.
 
 None of this means Linux is unusable — with the **Native RTSP client** it is a first-class platform
 for network video, and a well-equipped desktop distribution generally plays the classic path fine

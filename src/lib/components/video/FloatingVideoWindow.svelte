@@ -43,7 +43,7 @@
   } from '$lib/stores/video';
   import { canvasSink, mjpegSink } from '$lib/controllers/mjpegSink';
   import { detachVideo } from '$lib/controllers/detachedVideo';
-  import { isWindows } from '$lib/platform';
+  import { isMobile } from '$lib/platform';
   import { nativeSurface, activeNativeSurfaces } from '$lib/controllers/nativeVideo';
   import { doubleTap, mouseDoubleClick } from '$lib/helpers/doubleTap';
   import { beginFloatMove, startFloatMove, startFloatResize } from '$lib/helpers/floatWindowGestures';
@@ -68,9 +68,9 @@
   const live = $derived($videoState.status === 'live');
   /** The unplug button: take the picture out of the app into its own window (D3). Native decode
    *  sink only (D2) — the DOM paths render into THIS WebView and cannot be handed to another one.
-   *  Windows only for now: the macOS/Linux hosts live in the main window, so a second window has
-   *  nowhere to put the picture until they grow one (VIDEO_MULTISINK_WINDOW.md §4.2). */
-  const canDetach = $derived(isWindows && live && $videoState.nativeSink);
+   *  Every desktop platform serves it now, each in its own way: a child window on Windows, a second
+   *  AppKit host on macOS, a second GStreamer pipeline on Linux. */
+  const canDetach = $derived(!isMobile && live && $videoState.nativeSink);
   /** Narrow derived, not a raw store read in the effect below (that would re-run it on every
    *  telemetry patch): detaching must skip the slide-out — see there. */
   const detached = $derived($videoState.undocked);
@@ -314,9 +314,9 @@
       </div>
     {/if}
 
-    <!-- Resize corner: the lighter top-right corner of the bezel (an L in the bezel itself; the hit
-         area extends over the picture's corner, transparent). Video mode only — with the map in the
-         frame its layer covers the chrome, so +page draws the same corner above the map. -->
+    <!-- Resize corner: the lighter L just inside the picture's top-right corner. Video mode only —
+         with the map in the frame its layer covers the chrome, so +page draws the same corner
+         above the map. -->
     {#if !mapHere}
       <!-- svelte-ignore a11y_no_static_element_interactions -->
       <div class="fw-grip" onpointerdown={onGripPointerDown} title={$t('video.resizeWindow')}></div>
@@ -505,13 +505,14 @@
     padding: 0 10px;
   }
 
-  /* Resize corner — an L drawn IN the bezel (4 px = the bezel's border + padding), a shade lighter
-     than the glass, opaque, rounded with the frame's outer corner; the rest of the box is a
-     transparent, touch-sized hit area over the picture's corner. */
+  /* Resize corner — an L a shade lighter than the glass, set INSIDE the picture rather than drawn
+     into the bezel: it reads better there, and it is the same corner the detached window shows
+     (DetachedVideoFrame's `.dv-grip`). 7 px = the bezel's 4 px plus the 3 px inset both use. The
+     box is the hit area. */
   .fw-grip {
     position: absolute;
-    top: 0;
-    right: 0;
+    top: 7px;
+    right: 7px;
     width: 26px;
     height: 26px;
     z-index: 62;

@@ -490,11 +490,20 @@ pub fn video_detached_open(
         // it has no handle for, and a still window publishes nothing again until it moves.
         #[cfg(target_os = "windows")]
         match win.hwnd() {
-            Ok(handle) => app
-                .state::<crate::video::rtsp_native::NativeRtsp>()
-                .register_window(DETACHED_LABEL, handle.0 as isize),
+            Ok(handle) => {
+                app.state::<crate::video::rtsp_native::NativeRtsp>()
+                    .register_window(DETACHED_LABEL, handle.0 as isize);
+                // The same handle carries the aspect lock (`video_detached_aspect`): it holds the
+                // shape from inside the OS resize loop, where the page cannot reach.
+                crate::video::win_aspect::install(handle.0 as isize);
+            }
             Err(e) => log::warn!("[video] detached window has no native handle ({e}) — no picture there"),
         }
+        // Linux: the detached window needs a video layer tree of its own. A GStreamer sink's widget
+        // cannot move between windows, so that window gets its own host — and its own pipeline in
+        // `linux_sink`, fed the same access units from the one RTSP connection.
+        #[cfg(target_os = "linux")]
+        crate::video::linux_host::install_for(&app, DETACHED_LABEL);
         let app_handle = app.clone();
         win.on_window_event(move |event| {
             if matches!(event, tauri::WindowEvent::Destroyed) {
@@ -505,6 +514,11 @@ pub fn video_detached_open(
             }
         });
         let _ = win.show();
+        // Re-assert it after the window is realised: the builder flag is applied during creation,
+        // and this is the one property the window exists for (D12).
+        let _ = win.set_always_on_top(true);
+        #[cfg(target_os = "macos")]
+        crate::video::apple_host::float_window(DETACHED_LABEL.to_string());
         log::info!("[video] detached window opened at {x},{y} {w}x{h} (fullscreen={fullscreen})");
         Ok(())
     }
@@ -512,6 +526,32 @@ pub fn video_detached_open(
     {
         let _ = (app, x, y, w, h, fullscreen);
         Err("the detached video window is desktop-only".to_string())
+    }
+}
+
+/// Put the detached video window back above the others. Needed after every fullscreen toggle:
+/// tao ends its borderless-fullscreen mode by setting `NSNormalWindowLevel` unconditionally, so a
+/// window that was pinned comes back out of fullscreen at the normal level and sinks behind
+/// whatever the user clicks next (Marc, macOS, 2026-09-08). The viewer calls this itself, because
+/// it is the only side that knows a toggle happened.
+#[tauri::command(async)]
+pub fn video_detached_pin_top(app: AppHandle) -> Result<(), String> {
+    #[cfg(desktop)]
+    {
+        use tauri::Manager;
+
+        if let Some(win) = app.get_webview_window(DETACHED_LABEL) {
+            let _ = win.set_always_on_top(true);
+        }
+        // ...and on macOS at the level AppKit actually means — see `float_window`.
+        #[cfg(target_os = "macos")]
+        crate::video::apple_host::float_window(DETACHED_LABEL.to_string());
+        Ok(())
+    }
+    #[cfg(not(desktop))]
+    {
+        let _ = app;
+        Ok(())
     }
 }
 
@@ -523,9 +563,19 @@ pub fn video_detached_close(app: AppHandle) -> Result<(), String> {
     {
         use tauri::Manager;
 
+        // Surfaces first, window second. On Linux that window owns a GStreamer pipeline rendering
+        // into a widget INSIDE it, and withdrawing the surfaces is what stops that pipeline. The
+        // last frames may still be in flight when the window goes — a stopping pipeline's
+        // complaints are swallowed rather than ending the stream (see `linux_sink`'s bus loop).
+        app.state::<crate::video::rtsp_native::NativeRtsp>()
+            .forget_window(DETACHED_LABEL);
         if let Some(win) = app.get_webview_window(DETACHED_LABEL) {
             win.destroy().map_err(|e| e.to_string())?;
         }
+        // Belt and braces: whatever route the pipeline took down, this window's video layer must
+        // not outlive it (`linux_host` explains what an inherited one does to the next window).
+        #[cfg(target_os = "linux")]
+        crate::video::linux_host::uninstall(DETACHED_LABEL);
         Ok(())
     }
     #[cfg(not(desktop))]
@@ -533,4 +583,118 @@ pub fn video_detached_close(app: AppHandle) -> Result<(), String> {
         let _ = app;
         Ok(())
     }
+}
+
+/// What the detached window's page handles itself: the rects of its overlay buttons (while they
+/// are on screen) and of its resize corner, in CSS px, plus whether dragging the picture may move
+/// the window at all. Linux reads them from the GTK press handler — see `video::linux_drag`, which
+/// also explains why the move cannot go through `startDragging()` there. A no-op elsewhere.
+#[tauri::command]
+pub fn video_detached_chrome(zones: DetachedChrome) {
+    #[cfg(target_os = "linux")]
+    crate::video::linux_drag::set_zones(zones.drag, zones.grip, zones.chrome);
+    #[cfg(not(target_os = "linux"))]
+    let _ = zones;
+}
+
+/// Hold the detached window to the picture's shape while the user drags its corner. The page can
+/// only put the size right AFTER a drag — inside the OS's resize loop every correction it makes is
+/// overwritten by the next mouse move, which is what made the frame snap into shape when the
+/// pointer stopped. Each platform enforces it where its resize actually happens: a `WM_SIZING`
+/// subclass on Windows, GTK's geometry hints on Linux, AppKit's content aspect ratio on macOS.
+///
+/// `aspect` is the picture's width/height and `ring` the page's chrome around it in physical px;
+/// `aspect <= 0` releases the window, which is what fullscreen wants.
+#[tauri::command]
+pub fn video_detached_aspect(app: AppHandle, aspect: f64, ring: f64) {
+    #[cfg(target_os = "windows")]
+    {
+        let _ = &app;
+        crate::video::win_aspect::set_shape(aspect, ring);
+    }
+    #[cfg(target_os = "linux")]
+    crate::video::linux_drag::set_aspect(&app, DETACHED_LABEL, aspect, ring);
+    #[cfg(target_os = "macos")]
+    {
+        let _ = &app;
+        crate::video::apple_host::set_aspect(DETACHED_LABEL.to_string(), aspect, ring);
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
+    let _ = (app, aspect, ring);
+}
+
+/// Shake the detached window's size once, so its WebView gets a fresh framebuffer.
+///
+/// WebKitGTK's DMABUF renderer paints garbage into the first buffer the Pi's v3d driver hands it —
+/// scanline corruption over the whole page, reproduced on that hardware for months (the Jarvis
+/// dashboard carries the same workaround). It is not permanent: ANY change of the draw area's size
+/// forces the buffer to be built again and the picture is clean from then on. Kite's main window
+/// never shows it because it repaints constantly and clears the buffer by itself; the detached
+/// window's page is static and almost entirely transparent, so nothing ever forces a new buffer and
+/// the corruption stays for the life of the window (Marc, Pi 5, 2026-09-08).
+///
+/// Windowed, two pixels wider and back: the aspect lock pulls the height along, so one axis is
+/// enough and the window lands exactly where it started. Fullscreen, the compositor owns the size —
+/// the only size change left to a client is leaving fullscreen and going back in.
+///
+/// ARM Linux only: no other platform has this driver.
+#[tauri::command]
+pub fn video_detached_nudge(app: AppHandle) {
+    #[cfg(target_os = "linux")]
+    {
+        use tauri::Manager;
+
+        // A runtime test, not a `cfg`: this way the workaround is compiled and type-checked on every
+        // Linux, and const-folded away where it can never apply.
+        if !cfg!(target_arch = "aarch64") {
+            return;
+        }
+        let Some(win) = app.get_webview_window(DETACHED_LABEL) else { return };
+        // Off the caller's thread: both halves need the compositor to have acted in between.
+        std::thread::spawn(move || {
+            let settle = std::time::Duration::from_millis(200);
+            if win.is_fullscreen().unwrap_or(false) {
+                // Leaving fullscreen is not necessarily a SIZE change, and only a size change
+                // rebuilds the buffer. A window that was CREATED fullscreen — Kite restarted with
+                // the picture detached and full screen — has no windowed size to fall back to and
+                // comes out of fullscreen exactly as large as it went in, so the garbage stayed
+                // until Marc resized the window by hand (Pi 5, 2026-09-08). Force the change, then
+                // put the size back before returning to fullscreen: what the window remembers as
+                // its windowed box must not shrink just because we shook it.
+                let _ = win.set_fullscreen(false);
+                std::thread::sleep(settle);
+                if let Ok(size) = win.inner_size() {
+                    let smaller = tauri::PhysicalSize::new(
+                        size.width.saturating_sub(64).max(320),
+                        size.height.saturating_sub(64).max(240),
+                    );
+                    let _ = win.set_size(smaller);
+                    std::thread::sleep(settle);
+                    let _ = win.set_size(size);
+                    std::thread::sleep(settle);
+                }
+                let _ = win.set_fullscreen(true);
+                return;
+            }
+            let Ok(size) = win.inner_size() else { return };
+            let _ = win.set_size(tauri::PhysicalSize::new(size.width + 2, size.height));
+            std::thread::sleep(settle);
+            let _ = win.set_size(size);
+        });
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = app;
+}
+
+/// The page's layout, as [`video_detached_chrome`] takes it. Only Linux reads the rects — the other
+/// platforms take their window gestures from the page itself and never need to know.
+#[derive(serde::Deserialize)]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub struct DetachedChrome {
+    /// Dragging the picture moves the window (false while fullscreen).
+    pub drag: bool,
+    /// The resize corner, `[x, y, w, h]`.
+    pub grip: Option<[f64; 4]>,
+    /// Rects the page wants the press for.
+    pub chrome: Vec<[f64; 4]>,
 }
