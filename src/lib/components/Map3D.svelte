@@ -326,6 +326,14 @@
   let pendingTrailPos: Cesium.Cartesian3 | undefined;
   let pendingTrailColor = '';
   const MIN_TRAIL_DIST_3D = 1; // meters
+  /** Points per dynamic run before it is baked into a static segment. The growing run is a
+   *  CallbackProperty polyline, and Cesium rebuilds THAT geometry on every render — so its cost
+   *  is per frame × points. Unbounded, a long flight paid for its whole track every frame
+   *  (profiled on a Sony XQ-CT54, 2026-09-08: the polyline rebuild doubled in four minutes of
+   *  flight and the 3D view fell to ~15 fps). Baking every few hundred points keeps the
+   *  per-frame work constant; the static segments are batched by Cesium and cost nothing after
+   *  their one-off build. 256 points × 5 m spacing ≈ 1.3 km per segment. */
+  const TRAIL_CHUNK_POINTS = 256;
   // Pre-arm trail: a thin plain black, ground-clamped line of GPS movement while DISARMED (monitoring
   // only). Cleared on arm; the colored flight trail takes over.
   let preArmTrailEntity: Cesium.Entity | undefined;
@@ -3156,7 +3164,8 @@
     return new Cesium.ColorMaterialProperty(Cesium.Color.fromCssColorString(color).withAlpha(fpvAlpha(0.7)));
   }
 
-  /** Bake the current growing run into a static polyline (called on a colour change). */
+  /** Bake the current growing run into a static polyline (on a colour change, and every
+   *  TRAIL_CHUNK_POINTS — see there). */
   function finalizeActiveSegment() {
     if (!viewer || activeTrailPositions.length < 2) return;
     const seg = viewer.entities.add({
@@ -3165,6 +3174,7 @@
         width: 2,
         material: trailMaterial(trailCurrentColor3D),
         clampToGround: false,
+        arcType: Cesium.ArcType.NONE,
       },
     });
     trailSegments3D.push({ entity: seg, color: trailCurrentColor3D });
@@ -3204,6 +3214,13 @@
     trailCurrentColor3D = color;
     activeTrailPositions.push(pos);
 
+    // Bound the dynamic run: bake it and continue from its last point (same colour) — the same
+    // hand-over the colour change above does, so the line stays continuous.
+    if (activeTrailPositions.length >= TRAIL_CHUNK_POINTS) {
+      finalizeActiveSegment();
+      activeTrailPositions = [activeTrailPositions[activeTrailPositions.length - 1]];
+    }
+
     if (!activeTrailEntity) {
       activeTrailEntity = viewer.entities.add({
         polyline: {
@@ -3211,6 +3228,11 @@
           width: 2,
           material: trailMaterial(color),
           clampToGround: false,
+          // Straight segments between points that are metres apart. The default (GEODESIC)
+          // subdivides every segment into great-circle arcs — for the dynamic run that meant
+          // re-arcing the whole track on every render (PolylinePipeline.generateCartesianArc was
+          // the top growing frame in the profile), for nothing visible at this spacing.
+          arcType: Cesium.ArcType.NONE,
         },
       });
     }
