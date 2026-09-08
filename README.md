@@ -24,8 +24,8 @@ Work on 1.1 (mobile, native video decode, and more) continues on the integration
 - **All changes** → pull request against **`development`**, the always-current trunk. Features and
   fixes alike land there and reach `master` as tested snapshots — so `master` builds are what you
   install if you want to try the development state.
-- **The one exception:** bug fixes during a release freeze go against **`master`**. A patch for the
-  released 1.0 is cut from the `v1.0.0` tag when one is needed.
+- **A fix for the released 1.0** → pull request against **`release/1.0.x`**, the maintenance branch cut
+  from the `v1.0.0` tag. Patch releases are tagged from it, and it is merged forward into `development`.
 
 Nobody commits to either branch directly — see
 **[Contributing](https://b14ckyy.github.io/Kite-GC/for-developers/contributing/)** for the full
