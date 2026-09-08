@@ -232,12 +232,14 @@ impl LinuxVideoSink {
             _ => {}
         }
         let shared = Arc::new(Shared::default());
-        let (main, gl) = match build_pipe("main", linux_host::SLOTS, codec, gl, &shared) {
+        // What the app is to treat as the picture's size — see the probe below.
+        let display = window.map(|w| (w.display_w(), w.display_h()));
+        let (main, gl) = match build_pipe("main", linux_host::SLOTS, codec, gl, display, &shared) {
             Ok(p) => (p, gl),
             Err(e) if gl => {
                 log::warn!("[video] linux sink: GL sink unavailable ({e}) — using the cairo sink");
                 GL_UNAVAILABLE.store(true, Ordering::Relaxed);
-                (build_pipe("main", linux_host::SLOTS, codec, false, &shared)?, false)
+                (build_pipe("main", linux_host::SLOTS, codec, false, display, &shared)?, false)
             }
             Err(e) => return Err(e),
         };
@@ -260,6 +262,7 @@ fn build_pipe(
     slots: usize,
     codec: VideoCodec,
     gl: bool,
+    display: Option<(u32, u32)>,
     shared: &Arc<Shared>,
 ) -> Result<Pipe, String> {
         let (parser, caps) = match codec {
@@ -448,8 +451,16 @@ fn build_pipe(
                             let w = st.get::<i32>("width").unwrap_or(0);
                             let h = st.get::<i32>("height").unwrap_or(0);
                             if w > 0 && h > 0 {
-                                s.width.store(w as u32, Ordering::Relaxed);
-                                s.height.store(h as u32, Ordering::Relaxed);
+                                // These caps carry what the DECODER hands out, and with a stripped
+                                // conformance window that is the CODED picture — padding included.
+                                // The app sizes every surface from this number, so a 720p stream
+                                // reported as 1280x736 tilts every picture box by 2 %: the frame
+                                // then holds a shape the picture cannot fill, and what the picture
+                                // does not cover is see-through (Marc, Pi 5, 2026-09-08). Report
+                                // what is meant to be SEEN; the padding stays the sink's business.
+                                let (rw, rh) = display.unwrap_or((w as u32, h as u32));
+                                s.width.store(rw, Ordering::Relaxed);
+                                s.height.store(rh, Ordering::Relaxed);
                                 // The FULL caps, not just the structure name: the memory feature is
                                 // the whole story of whether the decoder hands its frames over
                                 // without a copy (`memory:DMABuf` / `memory:VAMemory`) or through
@@ -638,7 +649,8 @@ impl LinuxVideoSink {
             if pipes.iter().any(|p| p.label == *w) {
                 continue;
             }
-            match build_pipe(w, 1, self.codec, self.gl, &self.shared) {
+            let display = self.window.map(|win| (win.display_w(), win.display_h()));
+            match build_pipe(w, 1, self.codec, self.gl, display, &self.shared) {
                 Ok(p) => pipes.push(p),
                 Err(e) => log::warn!("[video] linux sink: no pipeline for window {w}: {e}"),
             }

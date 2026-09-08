@@ -61,6 +61,14 @@
   let closeEl = $state<HTMLElement | undefined>(undefined);
   let fsEl = $state<HTMLElement | undefined>(undefined);
   let gripEl = $state<HTMLElement | undefined>(undefined);
+  /** The frame's inner box — the picture is fitted into it (see [`stage`]). */
+  let bodyEl = $state<HTMLElement | undefined>(undefined);
+  /** The picture's box inside that frame (css px). The hole IS the picture, never the whole frame:
+   *  the hardware layer letterboxes the stream inside whatever box it is given, and every pixel of
+   *  the hole the picture does not cover is window transparency — the desktop shone through it
+   *  (Marc, Pi 5, 2026-09-08). The mat behind the hole paints those pixels black instead, which is
+   *  also where fullscreen's bars come from on a screen whose shape is not the stream's. */
+  let stage = $state({ w: 0, h: 0 });
 
   const live = $derived(feed.status === 'live' && feed.nativeSink);
   const armed = $derived($activeNativeSurfaces.has('floating'));
@@ -70,6 +78,23 @@
   $effect(() => {
     if (live) startNativeSurfaceRouter();
     else stopNativeSurfaceRouter();
+  });
+
+  // Fit the picture into the frame on every shape change of either. A ResizeObserver rather than
+  // the window's own resize event: fullscreen, the ring and the window all change this box, and the
+  // element knows about all three.
+  $effect(() => {
+    const el = bodyEl;
+    const aspect = feed.aspect || 16 / 9;
+    if (!el) return;
+    const fit = (): void => {
+      const w = Math.min(el.clientWidth, el.clientHeight * aspect);
+      stage = { w, h: w / aspect };
+    };
+    fit();
+    const ro = new ResizeObserver(fit);
+    ro.observe(el);
+    return () => ro.disconnect();
   });
 
   let snapTimer = 0;
@@ -290,11 +315,20 @@
   <div
     class="dv-body"
     class:armed
+    bind:this={bodyEl}
     onpointerdown={onBodyPointerDown}
   >
+    <!-- The letterbox. `data-nv-clip` makes the router cut the picture out of it, so it paints
+         black exactly where the hardware layer is NOT — and nowhere else. -->
+    <div class="dv-mat" data-nv-clip></div>
     {#if live}
       <!-- The transparent hole the hardware layer shows through — see controllers/nativeVideo. -->
-      <div class="dv-hole" class:armed use:nativeSurface={'floating'}>
+      <div
+        class="dv-hole"
+        class:armed
+        style="width: {stage.w}px; height: {stage.h}px"
+        use:nativeSurface={'floating'}
+      >
         {#if !armed}<span>{$t('video.starting')}</span>{/if}
       </div>
     {:else}
@@ -383,6 +417,10 @@
   .dv-body {
     position: absolute;
     inset: 4px;
+    /* The picture sits centred in here; the mat fills whatever is left. */
+    display: flex;
+    align-items: center;
+    justify-content: center;
     box-sizing: border-box;
     background: #000;
     overflow: hidden;
@@ -408,9 +446,16 @@
     cursor: default;
   }
 
-  .dv-hole {
+  .dv-mat {
     position: absolute;
     inset: 0;
+    background: #000;
+  }
+
+  .dv-hole {
+    /* Sized to the picture (see `stage`), not to the frame. */
+    position: relative;
+    flex: none;
     display: flex;
     align-items: center;
     justify-content: center;
