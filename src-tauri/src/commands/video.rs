@@ -309,33 +309,22 @@ pub fn video_rtsp_native_start(
     }
 }
 
-/// Push the on-screen video rect (PHYSICAL px, main-window client coords) to the native
-/// decode sink: `x/y/w/h` is the surface's FULL box (video layout / aspect fit),
-/// `cx/cy/cw/ch` the VISIBLE part after scroll-container clipping — the sink cuts the
-/// video at that edge instead of shrinking it. Cheap; no-op while no sink runs.
+/// Publish the calling window's video surfaces to the native decode sink: every DOM hole it wants
+/// the picture in, with the surface's FULL box `x/y/w/h` (the video's aspect-fit layout) and its
+/// VISIBLE box `cx/cy/cw/ch` (what is left after the DOM's clipping ancestors — the sink CUTS the
+/// picture there instead of shrinking it). All in PHYSICAL px of that window's client area.
+///
+/// The list REPLACES what this window published before, so visibility is implicit: a surface that
+/// stops being listed is gone, and an empty list means this window shows nothing. Tauri hands us
+/// the calling window, so a second window (the detached video window) can never overwrite the main
+/// window's holes. Cheap; a no-op while no sink runs.
 #[tauri::command]
-#[allow(clippy::too_many_arguments)]
-pub fn video_rtsp_native_sink_rect(
-    x: i32,
-    y: i32,
-    w: i32,
-    h: i32,
-    cx: i32,
-    cy: i32,
-    cw: i32,
-    ch: i32,
+pub fn video_rtsp_native_sink_surfaces(
+    surfaces: Vec<crate::video::surface::SurfaceRect>,
+    window: tauri::Window,
     native_rtsp: State<'_, crate::video::rtsp_native::NativeRtsp>,
 ) {
-    native_rtsp.sink_rect(x, y, w, h, cx, cy, cw, ch);
-}
-
-/// Show/hide the native decode sink's layer (no DOM surface displays the video right now).
-#[tauri::command]
-pub fn video_rtsp_native_sink_visible(
-    visible: bool,
-    native_rtsp: State<'_, crate::video::rtsp_native::NativeRtsp>,
-) {
-    native_rtsp.sink_visible(visible);
+    native_rtsp.sink_surfaces(window.label(), surfaces);
 }
 
 /// Smoothing-buffer depth for the native decode sink (frames, 0 = present on decode —
@@ -398,4 +387,314 @@ pub fn video_linux_hole_spike(on: bool) -> Result<(), String> {
         let _ = on;
         Err("not available on this build".to_string())
     }
+}
+
+// ── Detached video window (VIDEO_MULTISINK_WINDOW.md PR B) ────────────
+
+#[cfg(desktop)]
+/// Label of the detached video window. The surface router in that window publishes its holes under
+/// this label, so the sink can tell them apart from the main window's.
+pub const DETACHED_LABEL: &str = "video";
+
+/// How long `video_detached_open` waits for the window to come up, and in what steps.
+#[cfg(desktop)]
+const READY_POLLS: u32 = 60;
+#[cfg(desktop)]
+const READY_POLL_MS: u64 = 50;
+
+#[cfg(desktop)]
+/// Emitted to the main window when the detached video window is gone — its own close button,
+/// Alt+F4, or our `video_detached_close`. The frontend docks the picture back in (D6).
+pub const DETACHED_CLOSED_EVENT: &str = "video-detached-closed";
+
+/// Spawn the detached video window: a transparent, undecorated, always-on-top window (D4, D8, D12)
+/// running the `/video` route, which draws the same glass frame as the in-app floating window and
+/// registers ONE hole for the native decode sink.
+///
+/// Geometry is ours, not the window-state plugin's (see §5.5 — the plugin restores a size onto a
+/// monitor that may be gone): `x/y` and `w/h` are PHYSICAL px, already validated against the
+/// available monitors by the caller. Opening it twice just focuses the existing window.
+#[tauri::command(async)]
+pub fn video_detached_open(
+    app: AppHandle,
+    x: i32,
+    y: i32,
+    w: u32,
+    h: u32,
+    fullscreen: bool,
+) -> Result<(), String> {
+    // Desktop only — a second window is a desktop idea, and half the window API this needs
+    // (`title` on the builder, `set_focus`, `destroy`) does not exist on mobile. The phone shows
+    // the docked window or the widget, never both (D10), and never a second window.
+    #[cfg(desktop)]
+    {
+        use tauri::{Manager, PhysicalPosition, PhysicalSize, WebviewUrl, WebviewWindowBuilder};
+
+        if let Some(win) = app.get_webview_window(DETACHED_LABEL) {
+            let _ = win.set_focus();
+            return Ok(());
+        }
+        // Built hidden: a transparent window flashes its background before the page paints, and the
+        // exact box is applied below in physical px (the builder only takes logical ones).
+        #[allow(unused_mut)]
+        let mut builder = WebviewWindowBuilder::new(&app, DETACHED_LABEL, WebviewUrl::App("video".into()))
+            .title("Kite Ground Control — Video")
+            .decorations(false)
+            .transparent(true)
+            .resizable(true)
+            .always_on_top(true)
+            .visible(false)
+            .inner_size(640.0, 360.0)
+            .min_inner_size(200.0, 120.0);
+        // Every WebView2 in a process shares ONE environment, and asking for a second one with different
+        // browser arguments fails with ERROR_INVALID_STATE (0x8007139F) — the webview is then never
+        // created while the window creation still reports success. The main window sets its own
+        // arguments in tauri.windows.conf.json, so this window has to ask for exactly the same ones;
+        // read from the config rather than repeated here, so the two cannot drift apart.
+        #[cfg(windows)]
+        if let Some(args) = app
+            .config()
+            .app
+            .windows
+            .first()
+            .and_then(|w| w.additional_browser_args.clone())
+        {
+            builder = builder.additional_browser_args(&args);
+        }
+        let win = builder
+            .build()
+            .map_err(|e| format!("detached video window: {e}"))?;
+        // `create_window` hands the event loop a closure and returns: the window is built a moment
+        // later on the main thread, and a failure THERE is only logged, never returned. So wait until
+        // the window answers before reporting success — otherwise a window that was never created looks
+        // exactly like a working one from here (which is how the WebView2 mismatch above stayed hidden).
+        let mut ready = false;
+        for _ in 0..READY_POLLS {
+            if win.is_visible().is_ok() {
+                ready = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(READY_POLL_MS));
+        }
+        if !ready {
+            log::warn!("[video] detached window was not created — see the error above this line");
+            let _ = win.destroy();
+            return Err("the video window could not be created".to_string());
+        }
+        let _ = win.set_position(PhysicalPosition::new(x, y));
+        let _ = win.set_size(PhysicalSize::new(w.max(200), h.max(120)));
+        if fullscreen {
+            let _ = win.set_fullscreen(true);
+        }
+        // The native handle BEFORE the page can publish a surface: the sink drops surfaces from a window
+        // it has no handle for, and a still window publishes nothing again until it moves.
+        #[cfg(target_os = "windows")]
+        match win.hwnd() {
+            Ok(handle) => {
+                app.state::<crate::video::rtsp_native::NativeRtsp>()
+                    .register_window(DETACHED_LABEL, handle.0 as isize);
+                // The same handle carries the aspect lock (`video_detached_aspect`): it holds the
+                // shape from inside the OS resize loop, where the page cannot reach.
+                crate::video::win_aspect::install(handle.0 as isize);
+            }
+            Err(e) => log::warn!("[video] detached window has no native handle ({e}) — no picture there"),
+        }
+        // Linux: the detached window needs a video layer tree of its own. A GStreamer sink's widget
+        // cannot move between windows, so that window gets its own host — and its own pipeline in
+        // `linux_sink`, fed the same access units from the one RTSP connection.
+        #[cfg(target_os = "linux")]
+        crate::video::linux_host::install_for(&app, DETACHED_LABEL);
+        let app_handle = app.clone();
+        win.on_window_event(move |event| {
+            if matches!(event, tauri::WindowEvent::Destroyed) {
+                app_handle
+                    .state::<crate::video::rtsp_native::NativeRtsp>()
+                    .forget_window(DETACHED_LABEL);
+                let _ = app_handle.emit_to("main", DETACHED_CLOSED_EVENT, ());
+            }
+        });
+        let _ = win.show();
+        // Re-assert it after the window is realised: the builder flag is applied during creation,
+        // and this is the one property the window exists for (D12).
+        let _ = win.set_always_on_top(true);
+        #[cfg(target_os = "macos")]
+        crate::video::apple_host::float_window(DETACHED_LABEL.to_string());
+        log::info!("[video] detached window opened at {x},{y} {w}x{h} (fullscreen={fullscreen})");
+        Ok(())
+    }
+    #[cfg(not(desktop))]
+    {
+        let _ = (app, x, y, w, h, fullscreen);
+        Err("the detached video window is desktop-only".to_string())
+    }
+}
+
+/// Put the detached video window back above the others. Needed after every fullscreen toggle:
+/// tao ends its borderless-fullscreen mode by setting `NSNormalWindowLevel` unconditionally, so a
+/// window that was pinned comes back out of fullscreen at the normal level and sinks behind
+/// whatever the user clicks next (Marc, macOS, 2026-09-08). The viewer calls this itself, because
+/// it is the only side that knows a toggle happened.
+#[tauri::command(async)]
+pub fn video_detached_pin_top(app: AppHandle) -> Result<(), String> {
+    #[cfg(desktop)]
+    {
+        use tauri::Manager;
+
+        if let Some(win) = app.get_webview_window(DETACHED_LABEL) {
+            let _ = win.set_always_on_top(true);
+        }
+        // ...and on macOS at the level AppKit actually means — see `float_window`.
+        #[cfg(target_os = "macos")]
+        crate::video::apple_host::float_window(DETACHED_LABEL.to_string());
+        Ok(())
+    }
+    #[cfg(not(desktop))]
+    {
+        let _ = app;
+        Ok(())
+    }
+}
+
+/// Close the detached video window if it is open. Idempotent — the picture docks back into the app
+/// when the `video-detached-closed` event lands.
+#[tauri::command(async)]
+pub fn video_detached_close(app: AppHandle) -> Result<(), String> {
+    #[cfg(desktop)]
+    {
+        use tauri::Manager;
+
+        // Surfaces first, window second. On Linux that window owns a GStreamer pipeline rendering
+        // into a widget INSIDE it, and withdrawing the surfaces is what stops that pipeline. The
+        // last frames may still be in flight when the window goes — a stopping pipeline's
+        // complaints are swallowed rather than ending the stream (see `linux_sink`'s bus loop).
+        app.state::<crate::video::rtsp_native::NativeRtsp>()
+            .forget_window(DETACHED_LABEL);
+        if let Some(win) = app.get_webview_window(DETACHED_LABEL) {
+            win.destroy().map_err(|e| e.to_string())?;
+        }
+        // Belt and braces: whatever route the pipeline took down, this window's video layer must
+        // not outlive it (`linux_host` explains what an inherited one does to the next window).
+        #[cfg(target_os = "linux")]
+        crate::video::linux_host::uninstall(DETACHED_LABEL);
+        Ok(())
+    }
+    #[cfg(not(desktop))]
+    {
+        let _ = app;
+        Ok(())
+    }
+}
+
+/// What the detached window's page handles itself: the rects of its overlay buttons (while they
+/// are on screen) and of its resize corner, in CSS px, plus whether dragging the picture may move
+/// the window at all. Linux reads them from the GTK press handler — see `video::linux_drag`, which
+/// also explains why the move cannot go through `startDragging()` there. A no-op elsewhere.
+#[tauri::command]
+pub fn video_detached_chrome(zones: DetachedChrome) {
+    #[cfg(target_os = "linux")]
+    crate::video::linux_drag::set_zones(zones.drag, zones.grip, zones.chrome);
+    #[cfg(not(target_os = "linux"))]
+    let _ = zones;
+}
+
+/// Hold the detached window to the picture's shape while the user drags its corner. The page can
+/// only put the size right AFTER a drag — inside the OS's resize loop every correction it makes is
+/// overwritten by the next mouse move, which is what made the frame snap into shape when the
+/// pointer stopped. Each platform enforces it where its resize actually happens: a `WM_SIZING`
+/// subclass on Windows, GTK's geometry hints on Linux, AppKit's content aspect ratio on macOS.
+///
+/// `aspect` is the picture's width/height and `ring` the page's chrome around it in physical px;
+/// `aspect <= 0` releases the window, which is what fullscreen wants.
+#[tauri::command]
+pub fn video_detached_aspect(app: AppHandle, aspect: f64, ring: f64) {
+    #[cfg(target_os = "windows")]
+    {
+        let _ = &app;
+        crate::video::win_aspect::set_shape(aspect, ring);
+    }
+    #[cfg(target_os = "linux")]
+    crate::video::linux_drag::set_aspect(&app, DETACHED_LABEL, aspect, ring);
+    #[cfg(target_os = "macos")]
+    {
+        let _ = &app;
+        crate::video::apple_host::set_aspect(DETACHED_LABEL.to_string(), aspect, ring);
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
+    let _ = (app, aspect, ring);
+}
+
+/// Shake the detached window's size once, so its WebView gets a fresh framebuffer.
+///
+/// WebKitGTK's DMABUF renderer paints garbage into the first buffer the Pi's v3d driver hands it —
+/// scanline corruption over the whole page, reproduced on that hardware for months (the Jarvis
+/// dashboard carries the same workaround). It is not permanent: ANY change of the draw area's size
+/// forces the buffer to be built again and the picture is clean from then on. Kite's main window
+/// never shows it because it repaints constantly and clears the buffer by itself; the detached
+/// window's page is static and almost entirely transparent, so nothing ever forces a new buffer and
+/// the corruption stays for the life of the window (Marc, Pi 5, 2026-09-08).
+///
+/// Windowed, two pixels wider and back: the aspect lock pulls the height along, so one axis is
+/// enough and the window lands exactly where it started. Fullscreen, the compositor owns the size —
+/// the only size change left to a client is leaving fullscreen and going back in.
+///
+/// ARM Linux only: no other platform has this driver.
+#[tauri::command]
+pub fn video_detached_nudge(app: AppHandle) {
+    #[cfg(target_os = "linux")]
+    {
+        use tauri::Manager;
+
+        // A runtime test, not a `cfg`: this way the workaround is compiled and type-checked on every
+        // Linux, and const-folded away where it can never apply.
+        if !cfg!(target_arch = "aarch64") {
+            return;
+        }
+        let Some(win) = app.get_webview_window(DETACHED_LABEL) else { return };
+        // Off the caller's thread: both halves need the compositor to have acted in between.
+        std::thread::spawn(move || {
+            let settle = std::time::Duration::from_millis(200);
+            if win.is_fullscreen().unwrap_or(false) {
+                // Leaving fullscreen is not necessarily a SIZE change, and only a size change
+                // rebuilds the buffer. A window that was CREATED fullscreen — Kite restarted with
+                // the picture detached and full screen — has no windowed size to fall back to and
+                // comes out of fullscreen exactly as large as it went in, so the garbage stayed
+                // until Marc resized the window by hand (Pi 5, 2026-09-08). Force the change, then
+                // put the size back before returning to fullscreen: what the window remembers as
+                // its windowed box must not shrink just because we shook it.
+                let _ = win.set_fullscreen(false);
+                std::thread::sleep(settle);
+                if let Ok(size) = win.inner_size() {
+                    let smaller = tauri::PhysicalSize::new(
+                        size.width.saturating_sub(64).max(320),
+                        size.height.saturating_sub(64).max(240),
+                    );
+                    let _ = win.set_size(smaller);
+                    std::thread::sleep(settle);
+                    let _ = win.set_size(size);
+                    std::thread::sleep(settle);
+                }
+                let _ = win.set_fullscreen(true);
+                return;
+            }
+            let Ok(size) = win.inner_size() else { return };
+            let _ = win.set_size(tauri::PhysicalSize::new(size.width + 2, size.height));
+            std::thread::sleep(settle);
+            let _ = win.set_size(size);
+        });
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = app;
+}
+
+/// The page's layout, as [`video_detached_chrome`] takes it. Only Linux reads the rects — the other
+/// platforms take their window gestures from the page itself and never need to know.
+#[derive(serde::Deserialize)]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub struct DetachedChrome {
+    /// Dragging the picture moves the window (false while fullscreen).
+    pub drag: bool,
+    /// The resize corner, `[x, y, w, h]`.
+    pub grip: Option<[f64; 4]>,
+    /// Rects the page wants the press for.
+    pub chrome: Vec<[f64; 4]>,
 }

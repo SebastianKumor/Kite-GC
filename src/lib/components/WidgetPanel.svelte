@@ -3,7 +3,10 @@
   Copyright (C) 2026 Marc Hoffmann (b14ckyy)
 -->
 
-<!-- WidgetPanel — a panel strip (horizontal or vertical) that holds widgets with drag-and-drop reordering -->
+<!-- WidgetPanel — a panel strip (horizontal or vertical) that holds widgets with drag-and-drop reordering.
+     Edit mode is entered by a LONG-PRESS on a widget (mouse or finger — the phone grid's gesture,
+     PhoneWidgetPanel), which also picks that widget up; a press outside the docks or Escape leaves it.
+     The flag is bindable: both docks share one edit mode (+page owns the state). -->
 <script lang="ts">
   import { t } from 'svelte-i18n';
   import type { TelemetryData } from "$lib/stores/telemetry";
@@ -22,7 +25,7 @@
     crossPx = $bindable(0),
     telem,
     interfaceSettings = { speedUnit: 'kmh', altitudeUnit: 'm', distanceUnit: 'metric', verticalSpeedUnit: 'ms', temperatureUnit: 'c' },
-    editing = false,
+    editing = $bindable(false),
     onreorder,
     onreceive,
     onresize,
@@ -44,7 +47,9 @@
     crossPx?: number;
     telem: TelemetryData;
     interfaceSettings?: InterfaceSettings;
-    editing: boolean;
+    /** Edit mode (shared by every dock): set by this panel's long-press, cleared by a press
+     *  outside any dock or Escape; the parent may also drive it. */
+    editing?: boolean;
     onreorder: (panelId: string, widgetIds: string[]) => void;
     onreceive: (targetPanel: string, widgetId: string, index: number) => void;
     /** Edit-mode resize button: step this widget to its next size state. */
@@ -111,7 +116,9 @@
       clearGhost();
     };
 
+    // A press that moves before the long-press fires is a click-drag / scroll, not a pickup.
     const onWindowPointerMove = (e: PointerEvent) => {
+      if (pressTimer && Math.hypot(e.clientX - pressX, e.clientY - pressY) > PRESS_SLOP_PX) clearPress();
       if (!editing) return;
       const payload = getGlobalDragPayload();
       if (!payload) {
@@ -133,6 +140,7 @@
     };
 
     const onWindowPointerUp = (e: PointerEvent) => {
+      clearPress();
       if (!editing) return;
       const payload = getGlobalDragPayload();
       if (!payload) {
@@ -171,21 +179,58 @@
     // all). Without it the payload and the ghost would be left behind and the panel would look
     // permanently mid-drag.
     const onWindowPointerCancel = () => {
+      clearPress();
       if (!getGlobalDragPayload()) return;
       if (DND_DEBUG) console.log('[WIDGET-DND] pointercancel', { panelId });
       setGlobalDragPayload(null);
       resetLocalDrag();
     };
 
+    // Capture phase: (a) the map swapped into the video widget's tile is a top-level layer OVER the
+    // tile, so a press on it is relayed to the slot beneath — a long-press there still opens edit
+    // mode (in edit mode +page makes that layer click-through, and the tile gets the pointer itself);
+    // (b) in edit mode a press outside every dock leaves it (the docks share one flag, so either
+    // panel's listener may clear it).
+    const onWindowPointerDown = (e: PointerEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (!editing) {
+        if (e.button === 0 && target?.closest('.layer-map.in-frame')) {
+          const slot = slotAt(e.clientX, e.clientY);
+          if (slot) armPress(e, Number(slot.dataset.slotIdx), slot);
+        }
+        return;
+      }
+      if (!target?.closest('.widget-panel')) editing = false;
+    };
+    const onWindowKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && editing) editing = false;
+    };
+
     window.addEventListener('pointermove', onWindowPointerMove, true);
     window.addEventListener('pointerup', onWindowPointerUp, true);
     window.addEventListener('pointercancel', onWindowPointerCancel, true);
+    window.addEventListener('pointerdown', onWindowPointerDown, true);
+    window.addEventListener('keydown', onWindowKeyDown);
     return () => {
       window.removeEventListener('pointermove', onWindowPointerMove, true);
       window.removeEventListener('pointerup', onWindowPointerUp, true);
       window.removeEventListener('pointercancel', onWindowPointerCancel, true);
+      window.removeEventListener('pointerdown', onWindowPointerDown, true);
+      window.removeEventListener('keydown', onWindowKeyDown);
+      clearPress();
     };
   });
+
+  /** This panel's `.widget-slot` under a viewport point, looking THROUGH layers above it (the
+   *  swapped-in map) — `elementFromPoint` would only return the map. */
+  function slotAt(x: number, y: number): HTMLElement | null {
+    if (!panelEl) return null;
+    for (const el of document.elementsFromPoint(x, y)) {
+      const slot = (el as HTMLElement).closest<HTMLElement>('.widget-slot');
+      if (slot && panelEl.contains(slot)) return slot;
+    }
+    return null;
+  }
 
   function isPointInsidePanel(x: number, y: number): boolean {
     if (!panelEl) return false;
@@ -350,18 +395,60 @@
     }
   }
 
+  // ── Long-press → edit mode ──
+  // Hold a widget LONG_PRESS_MS without moving (mouse or finger) → edit mode, and the widget is
+  // picked up right away, so "hold, then drag" is one motion. Movement or release before that
+  // cancels: a click stays a click, a widget's own buttons keep working. Android's long-press
+  // haptic fires at ~500 ms — arming exactly there reads as "press until the buzz" on a tablet.
+  // In edit mode a press picks up immediately (no pages to flick here, unlike the phone grid).
+  const LONG_PRESS_MS = 500;
+  const PRESS_SLOP_PX = 8;
+  let pressTimer: ReturnType<typeof setTimeout> | null = null;
+  let pressX = 0;
+  let pressY = 0;
+
+  function clearPress() {
+    if (pressTimer) clearTimeout(pressTimer);
+    pressTimer = null;
+  }
+
+  function armPress(e: PointerEvent, idx: number, slotEl: HTMLElement) {
+    clearPress();
+    pressX = e.clientX;
+    pressY = e.clientY;
+    pressTimer = setTimeout(() => {
+      pressTimer = null;
+      editing = true;
+      try {
+        navigator.vibrate?.(30);
+      } catch {
+        /* no haptics */
+      }
+      startPointerDrag(e, idx, slotEl);
+    }, LONG_PRESS_MS);
+  }
+
   function handlePointerDown(e: PointerEvent, idx: number) {
     // button is 0 for a touch contact and the primary mouse button alike.
-    if (!editing || e.button !== 0) return;
+    if (e.button !== 0) return;
+    const slotEl = e.currentTarget as HTMLElement;
+    if (!editing) {
+      armPress(e, idx, slotEl);
+      return;
+    }
     e.preventDefault();
+    startPointerDrag(e, idx, slotEl);
+  }
+
+  /** Pick the widget up (edit mode): the ghost follows the pointer, the window listeners drop it. */
+  function startPointerDrag(e: PointerEvent, idx: number, slotEl: HTMLElement) {
     dragIdx = idx;
     activeDragPayload = { panelId, widgetId: widgetIds[idx], sourceIdx: idx };
     setGlobalDragPayload(activeDragPayload);
     ghostWidgetId = activeDragPayload.widgetId;
     ghostX = e.clientX + 14;
     ghostY = e.clientY + 14;
-    const el = e.currentTarget as HTMLElement;
-    const rect = el.getBoundingClientRect();
+    const rect = slotEl.getBoundingClientRect();
     ghostW = Math.max(100, Math.round(rect.width));
     ghostH = Math.max(100, Math.round(rect.height));
     if (DND_DEBUG) console.log('[WIDGET-DND] pointerdown start', activeDragPayload);
@@ -477,6 +564,7 @@
   class:empty={widgetIds.length === 0}
   class:drag-hover={externalDragOver}
   style="gap: {gapPx}px;"
+  oncontextmenu={(e) => { if (pressTimer || editing) e.preventDefault(); }}
 >
   {#each items as item, idx (item.id)}
     <!-- svelte-ignore a11y_no_static_element_interactions -->

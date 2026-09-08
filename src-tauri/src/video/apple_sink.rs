@@ -5,7 +5,18 @@
 //! `win_sink` / `android_sink`: H.264/HEVC access units from the RTSP client are wrapped as
 //! compressed `CMSampleBuffer`s and enqueued into an `AVSampleBufferDisplayLayer`, which decodes
 //! them through VideoToolbox and renders straight into the hole-punch layer below the WebView
-//! (`apple_host.rs`). One decode thread owns the conversion; the layer lives in the host.
+//! (`apple_host.rs`). One decode thread owns the conversion; the layers live in the host.
+//!
+//! **One layer per surface** (VIDEO_MULTISINK_WINDOW.md §4.2): the video widget and the floating
+//! window at once, or a surface in the detached video window. AVFoundation decodes inside the
+//! layer, so a second surface means a second VideoToolbox session — accepted (D9); a shared
+//! `VTDecompressionSession` feeding both would be a large block of code for a few percent of GPU.
+//! Everything that belongs to a session is therefore per output: the resume-on-keyframe wait, the
+//! control timebase and its pacing anchor. The format description is immutable and shared.
+//!
+//! An output that leaves the published list is DROPPED, not hidden: unlike the Windows sink (one
+//! decoder, N cheap presents) a kept layer here would decode the whole stream for a picture nobody
+//! sees. The price is that a surface coming back waits for the next keyframe.
 //!
 //! The real work is the framing conversion: the depacketizer delivers Annex-B (start codes,
 //! in-band parameter sets), CoreMedia wants AVCC/HVCC (4-byte big-endian length prefixes, the
@@ -48,12 +59,15 @@ use objc2_core_media::{
 
 use super::apple_host as host;
 use super::rtsp::VideoCodec;
+use super::surface::SinkSurface;
 
-/// How long the initial layer attach may take (one main-thread hop away) before the sink
-/// declares failure.
-const FIRST_LAYER_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long a layer attach may take (one main-thread hop away) before the output is given up on.
+const LAYER_ATTACH_TIMEOUT: Duration = Duration::from_secs(10);
 /// RTP video clock — the timestamps `push` receives are 90 kHz ticks.
 const TIMESCALE: i32 = 90_000;
+/// Surfaces served at once (D1: the widget tile plus one large surface). Each costs a decode here,
+/// so the cap is a real budget, not just politeness.
+const MAX_OUTPUTS: usize = 2;
 
 enum Cmd {
     /// One access unit (Annex-B, in-band parameter sets) + its unwrapped 90 kHz timestamp.
@@ -71,9 +85,12 @@ struct Shared {
     /// Smoothing-buffer depth in frames (0 = display immediately).
     buffer_frames: AtomicU32,
     stopping: AtomicBool,
-    /// No DOM surface on screen — the layer is hidden by the host; decoding continues so the
-    /// picture is there the instant it comes back.
-    hidden: AtomicBool,
+    /// What the router last published, latest-wins, plus a revision the decode thread compares
+    /// against its own. Deliberately NOT a channel message: geometry arrives once per animation
+    /// frame during a drag, and anything queued behind the frames would make the layer trail the
+    /// hole by the whole backlog (the lesson `win_sink` learned in PR #128).
+    surfaces: Mutex<Vec<SinkSurface>>,
+    rev: AtomicU64,
 }
 
 impl Shared {
@@ -110,7 +127,7 @@ impl AppleVideoSink {
             let shared = shared.clone();
             std::thread::spawn(move || {
                 decode_loop(hevc, &rx, &shared);
-                host::detach();
+                host::remove_all();
             })
         };
         Ok(Self { tx, thread: Some(thread), shared })
@@ -126,17 +143,23 @@ impl AppleVideoSink {
         self.shared.error.lock().unwrap().clone()
     }
 
-    /// On-screen video rect (PHYSICAL px, window coords): the FULL box `x/y/w/h` for the
-    /// aspect-fit layout plus the VISIBLE part `cx/cy/cw/ch` — the host clips the video at that
-    /// edge (scrolled panels), it never shrinks into the remainder.
-    #[allow(clippy::too_many_arguments)]
-    pub fn set_rect(&self, x: i32, y: i32, w: i32, h: i32, cx: i32, cy: i32, cw: i32, ch: i32) {
-        host::set_rect(x, y, w, h, cx, cy, cw, ch);
-    }
-
-    pub fn set_visible(&self, visible: bool) {
-        self.shared.hidden.store(!visible, Ordering::Relaxed);
-        host::set_visible(visible);
+    /// The surfaces to present into (VIDEO_MULTISINK_WINDOW.md §4.1), highest priority first and
+    /// capped at [`MAX_OUTPUTS`]. Each is served by its own layer in its own window; an empty list
+    /// means nothing is on screen and every output goes away. Cheap: the decode thread picks the
+    /// list up on its next pass (see `Shared::surfaces`).
+    pub fn set_surfaces(&self, surfaces: &[SinkSurface]) {
+        let mut want: Vec<SinkSurface> = surfaces.iter().take(MAX_OUTPUTS).cloned().collect();
+        if surfaces.len() > MAX_OUTPUTS {
+            log::debug!(
+                "[video] apple sink: {} surfaces published, {MAX_OUTPUTS} served",
+                surfaces.len()
+            );
+        }
+        let mut slot = self.shared.surfaces.lock().unwrap();
+        if *slot != want {
+            std::mem::swap(&mut *slot, &mut want);
+            self.shared.rev.fetch_add(1, Ordering::Release);
+        }
     }
 
     /// Smoothing-buffer depth in frames (0 = display immediately — the latency-first default).
@@ -171,14 +194,28 @@ impl Drop for AppleVideoSink {
     }
 }
 
-/// Create the display layer on the main thread (inside the host's attach) and return the shared
-/// handle the decode thread enqueues through.
-fn create_layer() -> Result<Arc<Layer>, String> {
+/// One live output: the surface it serves plus everything that belongs to its VideoToolbox
+/// session, which a second layer has a second of.
+struct Out {
+    key: String,
+    layer: Arc<Layer>,
+    /// This session starts on an intra frame; a flush or new parameter sets restart the wait.
+    wait_for_idr: bool,
+    timebase: Option<CFRetained<CMTimebase>>,
+    pacing: Pacing,
+    /// Last rect handed to the host — placing is a main-thread hop, so it happens on change only.
+    rect: [i32; 8],
+}
+
+/// Create a display layer for surface `key` in `window`, on the main thread (inside the host's
+/// attach, which builds the container view there if this is the surface's first appearance), and
+/// return the shared handle the decode thread enqueues through.
+fn create_layer(key: String, window: String) -> Result<Arc<Layer>, String> {
     let slot: Arc<Mutex<Option<Arc<Layer>>>> = Arc::new(Mutex::new(None));
     let fill = slot.clone();
     let (tx, rx) = std::sync::mpsc::channel::<Result<(), String>>();
     std::thread::spawn(move || {
-        let res = host::attach(move || {
+        let res = host::attach(key, window, move || {
             // SAFETY: plain AVFoundation object creation + property setup on the main thread.
             let layer = unsafe { AVSampleBufferDisplayLayer::new() };
             unsafe {
@@ -191,34 +228,91 @@ fn create_layer() -> Result<Arc<Layer>, String> {
         });
         let _ = tx.send(res);
     });
-    rx.recv_timeout(FIRST_LAYER_TIMEOUT)
+    rx.recv_timeout(LAYER_ATTACH_TIMEOUT)
         .map_err(|_| "display layer attach timed out".to_string())??;
     let layer = slot.lock().unwrap().take();
     layer.ok_or_else(|| "display layer was not created".into())
 }
 
-/// The decode thread: attach the layer, then convert + enqueue AUs until stop.
-fn decode_loop(hevc: bool, rx: &Receiver<Cmd>, shared: &Shared) {
-    let layer = match create_layer() {
-        Ok(l) => l,
-        Err(e) => {
-            shared.fail(e);
-            return;
+/// Bring `outs` in line with what the router published: a surface that appeared gets a container,
+/// a layer and its rect; one that moved gets the new rect; one that left is dropped entirely (see
+/// the module docs — a kept layer would keep decoding).
+///
+/// A surface whose window has no NSWindow (a detached window that is already closing) simply gets
+/// no output and is retried on the next push; nothing here can fail the stream.
+fn sync_outputs(outs: &mut Vec<Out>, want: &[SinkSurface], order: &mut Vec<String>) {
+    outs.retain(|out| {
+        if want.iter().any(|s| s.key == out.key) {
+            return true;
         }
-    };
-    log::info!("[video] apple sink: display layer up ({})", if hevc { "HEVC" } else { "H.264" });
+        // SAFETY: thread-safe queued-rendering call.
+        unsafe { out.layer.0.flushAndRemoveImage() };
+        host::remove(out.key.clone());
+        log::info!("[video] apple sink: output {} gone", out.key);
+        false
+    });
+    for s in want {
+        let rect = [s.full.0, s.full.1, s.full.2, s.full.3, s.clip.0, s.clip.1, s.clip.2, s.clip.3];
+        if let Some(out) = outs.iter_mut().find(|o| o.key == s.key) {
+            if out.rect != rect {
+                out.rect = rect;
+                host::place(s.key.clone(), rect);
+            }
+            continue;
+        }
+        match create_layer(s.key.clone(), s.window.clone()) {
+            Ok(layer) => {
+                host::place(s.key.clone(), rect);
+                log::info!("[video] apple sink: output for surface {} created", s.key);
+                outs.push(Out {
+                    key: s.key.clone(),
+                    layer,
+                    wait_for_idr: true,
+                    timebase: None,
+                    pacing: Pacing::default(),
+                    rect,
+                });
+            }
+            Err(e) => log::warn!("[video] apple sink: no output for surface {}: {e}", s.key),
+        }
+    }
+    // Stack them the way the DOM stacks their surfaces — matters wherever two overlap, e.g. the
+    // floating window dragged over the video widget, where the widget has to stay on top.
+    let want_order: Vec<String> = want
+        .iter()
+        .filter(|s| outs.iter().any(|o| o.key == s.key))
+        .map(|s| s.key.clone())
+        .collect();
+    if *order != want_order {
+        host::restack(want_order.clone());
+        *order = want_order;
+    }
+}
+
+/// The decode thread: follow the published surfaces, then convert + enqueue AUs until stop.
+/// Layers come and go with the surfaces — there is none until the DOM asks for one.
+fn decode_loop(hevc: bool, rx: &Receiver<Cmd>, shared: &Shared) {
+    log::info!("[video] apple sink: decode thread up ({})", if hevc { "HEVC" } else { "H.264" });
 
     let mut sets = ParameterSets::default();
     let mut format: Option<CFRetained<CMFormatDescription>> = None;
-    // The first session starts on the stream's first intra frame; a flush restarts the wait.
-    let mut wait_for_idr = true;
-    let mut pacing = Pacing::default();
-    let mut timebase: Option<CFRetained<CMTimebase>> = None;
+    let mut outs: Vec<Out> = Vec::new();
+    let mut order: Vec<String> = Vec::new();
+    let mut applied_rev = u64::MAX; // force one sync before the first frame
 
     loop {
+        // Surfaces first, so a frame always lands in the layout the DOM published last.
+        let rev = shared.rev.load(Ordering::Acquire);
+        if rev != applied_rev {
+            applied_rev = rev;
+            let want = shared.surfaces.lock().unwrap().clone();
+            sync_outputs(&mut outs, &want, &mut order);
+        }
         match rx.recv_timeout(Duration::from_millis(100)) {
             Ok(Cmd::Stop) | Err(RecvTimeoutError::Disconnected) => {
-                unsafe { layer.0.flushAndRemoveImage() };
+                for out in &outs {
+                    unsafe { out.layer.0.flushAndRemoveImage() };
+                }
                 return;
             }
             Ok(Cmd::Orient { mirror, rotate180 }) => host::set_orient(mirror, rotate180),
@@ -239,8 +333,10 @@ fn decode_loop(hevc: bool, rx: &Receiver<Cmd>, shared: &Shared) {
                             }
                             format = Some(desc);
                             if changed {
-                                // New sets mid-stream: the decoder must restart on the next IDR.
-                                wait_for_idr = true;
+                                // New sets mid-stream: every session must restart on the next IDR.
+                                for out in &mut outs {
+                                    out.wait_for_idr = true;
+                                }
                             }
                         }
                         Ok(None) => {} // sets incomplete — keep waiting
@@ -251,68 +347,90 @@ fn decode_loop(hevc: bool, rx: &Receiver<Cmd>, shared: &Shared) {
                     }
                 }
                 let Some(desc) = format.as_ref() else { continue };
-                if wait_for_idr && !has_intra_frame(hevc, &au) {
-                    continue;
+                if outs.is_empty() {
+                    continue; // nothing on screen — no session to feed, so nothing to decode
                 }
-                wait_for_idr = false;
-
-                // A layer that failed decoding needs a flush before it accepts anything again.
-                // SAFETY: thread-safe queued-rendering calls.
-                unsafe {
-                    if layer.0.status() == AVQueuedSampleBufferRenderingStatus::Failed {
-                        let msg = layer
-                            .0
-                            .error()
-                            .map(|e| e.localizedDescription().to_string())
-                            .unwrap_or_else(|| "display layer failed".into());
-                        shared.fail(format!("decode failed: {msg}"));
-                        return;
-                    }
-                    if layer.0.requiresFlushToResumeDecoding() {
-                        log::warn!("[video] apple sink: layer requires a flush — resuming on the next keyframe");
-                        layer.0.flush();
-                        wait_for_idr = true;
-                        pacing.anchor = None;
-                        continue;
-                    }
-                }
-
                 let depth = shared.buffer_frames.load(Ordering::Relaxed);
                 let pts = ts90k as i64;
-                // Depth > 0 paces on the control timebase; depth 0 displays immediately. Switching
-                // depth re-anchors the timeline.
-                if depth == 0 {
-                    if timebase.take().is_some() {
-                        unsafe { layer.0.setControlTimebase(None) };
+                // Computed at most once per AU, and only while some session is waiting for one.
+                let mut intra: Option<bool> = None;
+                // ONE sample per frame, enqueued into every live layer: CMSampleBuffer is
+                // immutable and reference-counted, and each layer decodes it for itself (D9).
+                let mut sample = None;
+
+                for out in &mut outs {
+                    // A layer that failed decoding needs a flush before it accepts anything again.
+                    // SAFETY: thread-safe queued-rendering calls.
+                    unsafe {
+                        if out.layer.0.status() == AVQueuedSampleBufferRenderingStatus::Failed {
+                            let msg = out
+                                .layer
+                                .0
+                                .error()
+                                .map(|e| e.localizedDescription().to_string())
+                                .unwrap_or_else(|| "display layer failed".into());
+                            shared.fail(format!("decode failed ({}): {msg}", out.key));
+                            return;
+                        }
+                        if out.layer.0.requiresFlushToResumeDecoding() {
+                            log::warn!(
+                                "[video] apple sink: {} requires a flush — resuming on the next keyframe",
+                                out.key
+                            );
+                            out.layer.0.flush();
+                            out.wait_for_idr = true;
+                            out.pacing.anchor = None;
+                            continue;
+                        }
                     }
-                } else {
-                    let tb = match timebase.as_ref() {
-                        Some(tb) => tb.clone(),
-                        None => match new_timebase() {
-                            Ok(tb) => {
-                                unsafe { layer.0.setControlTimebase(Some(&tb)) };
-                                timebase = Some(tb.clone());
-                                tb
-                            }
+                    if out.wait_for_idr {
+                        if !*intra.get_or_insert_with(|| has_intra_frame(hevc, &au)) {
+                            continue;
+                        }
+                        out.wait_for_idr = false;
+                    }
+
+                    // Depth > 0 paces on this session's control timebase; depth 0 displays
+                    // immediately. Switching depth re-anchors the timeline.
+                    if depth == 0 {
+                        if out.timebase.take().is_some() {
+                            unsafe { out.layer.0.setControlTimebase(None) };
+                        }
+                    } else {
+                        let tb = match out.timebase.as_ref() {
+                            Some(tb) => tb.clone(),
+                            None => match new_timebase() {
+                                Ok(tb) => {
+                                    unsafe { out.layer.0.setControlTimebase(Some(&tb)) };
+                                    out.timebase = Some(tb.clone());
+                                    tb
+                                }
+                                Err(e) => {
+                                    shared.fail(e);
+                                    return;
+                                }
+                            },
+                        };
+                        out.pacing.schedule(&tb, pts, depth);
+                    }
+
+                    if sample.is_none() {
+                        match make_sample(hevc, desc, &au, pts, depth == 0) {
+                            Ok(s) => sample = Some(s),
                             Err(e) => {
                                 shared.fail(e);
                                 return;
                             }
-                        },
-                    };
-                    pacing.schedule(&tb, pts, depth);
-                }
-
-                let sample = match make_sample(hevc, desc, &au, pts, depth == 0) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        shared.fail(e);
-                        return;
+                        }
                     }
-                };
-                // SAFETY: valid sample buffer; enqueue is thread-safe.
-                unsafe { layer.0.enqueueSampleBuffer(&sample) };
-                shared.presented.fetch_add(1, Ordering::Relaxed);
+                    let Some(buf) = sample.as_ref() else { continue };
+                    // SAFETY: valid sample buffer; enqueue is thread-safe.
+                    unsafe { out.layer.0.enqueueSampleBuffer(buf) };
+                }
+                // Per FRAME, not per surface — it is what the panel shows as fps.
+                if sample.is_some() {
+                    shared.presented.fetch_add(1, Ordering::Relaxed);
+                }
             }
             Err(RecvTimeoutError::Timeout) => {}
         }

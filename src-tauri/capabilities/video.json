@@ -1,0 +1,18 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "video-window",
+  "description": "Capability for the detached video window — its own chrome (drag, resize, fullscreen, close) and the event channel to the main window. No dialogs, no opener, no filesystem.",
+  "platforms": ["windows", "linux", "macOS"],
+  "windows": [
+    "video"
+  ],
+  "permissions": [
+    "core:default",
+    "core:window:allow-close",
+    "core:window:allow-start-dragging",
+    "core:window:allow-start-resize-dragging",
+    "core:window:allow-set-fullscreen",
+    "core:window:allow-set-size",
+    "core:window:allow-set-always-on-top"
+  ]
+}

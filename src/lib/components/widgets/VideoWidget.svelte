@@ -25,9 +25,9 @@
   // tile underneath it.
   import { t } from 'svelte-i18n';
   import { onMount, onDestroy } from 'svelte';
-  import { videoStream, videoState, bindVideoEl, setMapLocation, setWidgetRect, reportMjpegError } from '$lib/stores/video';
+  import { videoStream, videoState, bindVideoEl, setMapLocation, setWidgetRect, reportMjpegError, reportImgSize, fpsProbe } from '$lib/stores/video';
   import { canvasSink, mjpegSink } from '$lib/controllers/mjpegSink';
-  import { nativeSurface, activeNativeSurface } from '$lib/controllers/nativeVideo';
+  import { nativeSurface, activeNativeSurfaces } from '$lib/controllers/nativeVideo';
   import { doubleTap, mouseDoubleClick } from '$lib/helpers/doubleTap';
   import VideoReconnectOverlay from '$lib/components/video/VideoReconnectOverlay.svelte';
 
@@ -115,7 +115,7 @@
 <div
   bind:this={cardEl}
   class="widget-card"
-  class:nv-armed={$activeNativeSurface === 'widget'}
+  class:nv-armed={$activeNativeSurfaces.has('widget')}
   style="width:{width}px; height:{height}px;"
   ondblclick={mouseDoubleClick(swapHere)}
   use:doubleTap={swapHere}
@@ -130,12 +130,12 @@
          behind it). Only one surface at a time can hold the hole — see controllers/nativeVideo. -->
     <div
       class="native-hole"
-      class:armed={$activeNativeSurface === 'widget'}
+      class:armed={$activeNativeSurfaces.has('widget')}
       use:nativeSurface={'widget'}
       data-nv-cover
       data-nv-aspect={$videoState.aspect || 16 / 9}
     >
-      {#if $activeNativeSurface !== 'widget'}<span>{$t('video.sinkElsewhere')}</span>{/if}
+      {#if !$activeNativeSurfaces.has('widget')}<span>{$t('video.sinkElsewhere')}</span>{/if}
     </div>
   {:else if $videoState.status === 'live' && $videoState.mjpegUrl}
     <!-- Native / MJPEG feed (no MediaStream): drawn by the off-thread reader where the WebView
@@ -144,12 +144,13 @@
       <canvas use:mjpegSink class:mirror={$videoState.mirror} class:rot180={$videoState.rotate180}></canvas>
     {:else}
       <!-- svelte-ignore a11y_missing_attribute -->
-      <img src={$videoState.mjpegUrl} class:mirror={$videoState.mirror} class:rot180={$videoState.rotate180} onerror={reportMjpegError} />
+      <img src={$videoState.mjpegUrl} class:mirror={$videoState.mirror} class:rot180={$videoState.rotate180} onload={reportImgSize} onerror={reportMjpegError} />
     {/if}
   {:else if $videoState.status === 'live'}
     <!-- svelte-ignore a11y_media_has_caption -->
     <video
       bind:this={videoEl}
+      use:fpsProbe
       autoplay
       muted
       playsinline

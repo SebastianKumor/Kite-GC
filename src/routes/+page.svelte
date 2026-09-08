@@ -98,12 +98,14 @@
   import VideoBackdropMap from "$lib/components/video/VideoBackdropMap.svelte";
   import { LARGE_BASE_VMIN } from "$lib/config/widgetRegistry";
   import FloatingVideoWindow from "$lib/components/video/FloatingVideoWindow.svelte";
+  import { startDetachedVideo, stopDetachedVideo } from "$lib/controllers/detachedVideo";
   import PhoneVideoDock from "$lib/components/phone/PhoneVideoDock.svelte";
   import { setNativeRightBound } from "$lib/controllers/nativeVideo";
   import { doubleTap, mouseDoubleClick } from "$lib/helpers/doubleTap";
-  import { initVideo, videoState, videoStream, bindVideoEl, setMapLocation, setFloatHeightFrac, setFloatPos, registerPiPElement, reportMjpegError } from "$lib/stores/video";
+  import { startFloatResize } from "$lib/helpers/floatWindowGestures";
+  import { initVideo, videoState, videoStream, bindVideoEl, setMapLocation, reportMjpegError, setVideoWidgetActive, floatFrameRect, FLOAT_BEZEL_PX, FLOAT_MARGIN_PX, FLOAT_BTN_PX, FLOAT_BTN_GAP_PX } from "$lib/stores/video";
   import { canvasSink, mjpegSink } from "$lib/controllers/mjpegSink";
-  import { nativeSurface, activeNativeSurface } from "$lib/controllers/nativeVideo";
+  import { nativeSurface, activeNativeSurfaces } from "$lib/controllers/nativeVideo";
   import { lowPowerActive } from "$lib/stores/lowPower";
   import { initPulseBlink } from "$lib/stores/pulseBlink";
   import { openUrl } from "@tauri-apps/plugin-opener";
@@ -246,13 +248,6 @@
       ? Math.min(phonePanelW, Math.max(0, Math.round(logPlayerWidth + PHONE_PLAYER_CHROME_PX + phonePanelW - winW)))
       : 0,
   );
-  // Width the bottom dock must yield to the bottom-left snapped video window.
-  const videoReserve = $derived(
-    $videoState.floating && $videoState.floatSnapped
-      ? Math.min($videoState.floatHeightFrac * winH * ($videoState.aspect || 16 / 9), winW * 0.7) + 16
-      : 0,
-  );
-
   // Phone portrait: too narrow to fit the bottom HUD tiles in one row without clipping, so the dock
   // wraps them onto two rows (see the sizing below + the flex-wrap rule in WidgetPanel). Tablets and
   // desktop keep the single row. `winW`/`isMobile` are reactive so a rotate re-evaluates this.
@@ -268,14 +263,6 @@
   let mapVideoEl = $state<HTMLVideoElement | null>(null);
   $effect(() => {
     bindVideoEl(mapVideoEl, $videoStream);
-  });
-
-  // Persistent (always-mounted) source element for native Picture-in-Picture, so
-  // the PiP window survives closing the Video panel. Hidden but rendered/playing.
-  let pipVideoEl = $state<HTMLVideoElement | null>(null);
-  $effect(() => {
-    bindVideoEl(pipVideoEl, $videoStream);
-    if (pipVideoEl) registerPiPElement(pipVideoEl);
   });
 
   // Global UI scale (1 = 100%, up to 2). Zooms the chrome via `.ui-scale`; the map
@@ -294,13 +281,14 @@
     winH / uiScale - 53 - bottomDockH - 24 - 12 < NAV_RAIL_FULL_HEIGHT ? '6px' : gridBottomHeight
   );
 
-  // Floating-window rect (must match FloatingVideoWindow's own computation) — used
-  // to place the map inside the window's frame when the view is swapped. The window
-  // lives in the zoomed `.ui-scale` layer but the map is unzoomed, so the visual rect
-  // is the window's logical rect * uiScale.
-  // Must match FloatingVideoWindow's geometry exactly (incl. the 200px min-height floor that keeps
-  // the mini-map's 4 control buttons from overflowing) so the in-frame map aligns with the frame.
-  const FLOAT_MIN_H = 200;
+  // Floating-window rect — ONE computation (`floatFrameRect`, store) for the window itself (it gets
+  // the rect as props), the map placed inside its frame when the view is swapped, and the dock
+  // reserve. The window lives in the zoomed `.ui-scale` layer, so it is computed in that layer's
+  // logical px (viewport / uiScale); the map is unzoomed, so its visual rect is the logical rect *
+  // uiScale. The desktop frame has a glass bezel: the map goes into the INNER box.
+  const logicalW = $derived(winW / uiScale);
+  const logicalH = $derived(winH / uiScale);
+  const floatFrame = $derived(floatFrameRect($videoState, logicalW, logicalH));
   // Phone (PHONE_VIDEO.md D2): the DOCKED frame instead — the stream aspect fitted into 40 % of the
   // map-area height / 50 % of its width, whichever binds; bottom-right of the map area, left of the
   // corner-control column (8 + 38 + 8), bottom-aligned with the chip row (8 px; the safe inset is
@@ -313,12 +301,22 @@
   const dockW = $derived(Math.round(dockH * ($videoState.aspect || 16 / 9)));
   const dockLeft = $derived(phoneMapW - 8 - 38 - 8 - dockW);
   const dockTop = $derived(winH - 8 - dockH);
-  const floatH = $derived(
-    phoneUi ? dockH : Math.min(Math.round(0.3 * winH), Math.max(FLOAT_MIN_H, Math.round($videoState.floatHeightFrac * winH))),
+  const floatH = $derived(phoneUi ? dockH : floatFrame.height);
+  const floatW = $derived(phoneUi ? dockW : floatFrame.width);
+  const floatLeft = $derived(phoneUi ? dockLeft : floatFrame.left);
+  const floatTop = $derived(phoneUi ? dockTop : floatFrame.top);
+  // The phone's docked frame is chromeless (its body fills the frame); the desktop frame's bezel
+  // insets the picture — and the swapped-in map — by this much.
+  const floatBezel = $derived(phoneUi ? 0 : FLOAT_BEZEL_PX);
+  // Width the bottom dock must yield to the bottom-left video window + its toggle button: the
+  // snapped window with the button on its right while it is out, the button alone in the corner
+  // while it is parked or moved away. Nothing while no source is active (no window, no button).
+  const videoReserve = $derived(
+    !$videoState.enabled || $videoState.undocked
+      ? 0
+      : ($videoState.floating && $videoState.floatSnapped ? floatW + FLOAT_BTN_GAP_PX : 0) +
+        FLOAT_MARGIN_PX + FLOAT_BTN_PX + FLOAT_BTN_GAP_PX,
   );
-  const floatW = $derived(phoneUi ? dockW : Math.min(Math.round(floatH * ($videoState.aspect || 16 / 9)), Math.round(winW * 0.7)));
-  const floatLeft = $derived(phoneUi ? dockLeft : $videoState.floatSnapped ? 8 : $videoState.floatX);
-  const floatTop = $derived(phoneUi ? dockTop : $videoState.floatSnapped ? winH - floatH - 30 : $videoState.floatY);
   // The phone's widget column overlays the map: no native surface may show through it (the docked
   // frame parks behind it) — the surface router clips at its edge.
   $effect(() => {
@@ -351,7 +349,7 @@
   // Windows never showed it. The frame drawn by the zoomed chrome may sit up to half a px off the
   // rounded map rect — invisible, and .miniframe-ctl uses this same string so it stays aligned.
   const mapFrameStyle = $derived(
-    `left:${Math.round(floatLeft * uiScale)}px; top:${Math.round(floatTop * uiScale)}px; width:${Math.round(floatW * uiScale)}px; height:${Math.round(floatH * uiScale)}px;`,
+    `left:${Math.round((floatLeft + floatBezel) * uiScale)}px; top:${Math.round((floatTop + floatBezel) * uiScale)}px; width:${Math.round((floatW - 2 * floatBezel) * uiScale)}px; height:${Math.round((floatH - 2 * floatBezel) * uiScale)}px;`,
   );
   // The rect the in-frame map is positioned into (screen px): the floating frame, or the widget tile.
   const inFrameStyle = $derived(
@@ -368,40 +366,6 @@
       untrack(() => setMapLocation('main'));
     }
   });
-
-  // ── Mini-map frame controls (videoPrimary) ──────────────────────────
-  // Rendered top-level (unzoomed, above the in-frame map at z2) because the float-win's own corners
-  // live in the .ui-scale layer (z1) and would sit *behind* the map. Close swaps back; the grip
-  // resizes (top-right, bottom-left anchored), mirroring FloatingVideoWindow.
-  let miniResizing = false;
-  let mrStartY = 0;
-  let mrStartFrac = 0;
-  let mrStartBottom = 0;
-  let mrSnapped = false;
-  function miniResizeDown(e: PointerEvent) {
-    e.stopPropagation();
-    e.preventDefault();
-    miniResizing = true;
-    mrStartY = e.clientY;
-    mrStartFrac = $videoState.floatHeightFrac;
-    mrStartBottom = floatTop + floatH;
-    mrSnapped = $videoState.floatSnapped;
-    window.addEventListener('pointermove', miniResizeMove);
-    window.addEventListener('pointerup', miniResizeUp);
-  }
-  function miniResizeMove(e: PointerEvent) {
-    if (!miniResizing) return;
-    const delta = (mrStartY - e.clientY) / winH; // drag up → larger
-    const fracMin = Math.max(0.1, FLOAT_MIN_H / winH);
-    const newFrac = Math.min(0.3, Math.max(fracMin, mrStartFrac + delta));
-    setFloatHeightFrac(newFrac);
-    if (!mrSnapped) setFloatPos($videoState.floatX, mrStartBottom - newFrac * winH);
-  }
-  function miniResizeUp() {
-    miniResizing = false;
-    window.removeEventListener('pointermove', miniResizeMove);
-    window.removeEventListener('pointerup', miniResizeUp);
-  }
 
   // The WIDGET mini-map is locked to a clean nav view: 2D + heading-follow, zoom-only (3D/mode buttons
   // hidden via `miniControls`). The FLOATING map stays fully operational on the desktop; on the phone
@@ -1202,6 +1166,14 @@
 
   // Auto-start video with the last settings if it was running at last close.
   if (typeof window !== 'undefined') void initVideo();
+
+  // Detached video window (VIDEO_MULTISINK_WINDOW.md PR B): the controller reconciles the second OS
+  // window against `videoState.undocked` — including at launch, so a session that ended detached
+  // comes back detached as soon as the auto-started source is live.
+  onMount(() => {
+    startDetachedVideo();
+    return () => stopDetachedVideo();
+  });
 
   function toggleNavPanel() {
     navPanelOpen = !navPanelOpen;
@@ -2679,6 +2651,15 @@
   function patchPhoneWidgets(next: PhoneWidgetsConfig) {
     if (next !== $settings.phoneWidgets) settings.patch({ phoneWidgets: next });
   }
+  // The video store learns whether a Video widget is on screen (dock or phone grid): Start then
+  // leaves the floating window parked — the widget is the picture.
+  $effect(() => {
+    setVideoWidgetActive(
+      phoneUi
+        ? phoneCtrl.isPhoneWidgetActive(phoneWidgets, 'videoFeed')
+        : panels.bottom.includes('videoFeed') || panels.right.includes('videoFeed'),
+    );
+  });
 
   function toggleWidget(widgetId: string) {
     if (phoneUi) {
@@ -3319,7 +3300,8 @@
   <div
     class="layer-map"
     class:in-frame={mapInFrame}
-    class:parked={phoneUi && mapFloating && !$videoState.floating}
+    class:parked={mapFloating && !$videoState.floating}
+    class:edit-passive={widgetEditMode && mapInWidget}
     data-nv-clip={mapInFrame ? undefined : true}
     style={mapInFrame ? inFrameStyle : mapLayerStyle}
     onclick={minimizeLogbook}
@@ -3390,14 +3372,21 @@
     <StatusTextToasts />
   </div>
 
-  <!-- Floating-frame map controls — top-level/unzoomed so they sit ABOVE the in-frame map (z2); the
-       float-win's own corners live in .ui-scale (z1) and would be hidden behind it. Only for the
-       floating frame (resizable); the widget tile is sized by the dock. ✕ sends the map back to main. -->
-  {#if mapFloating && $videoState.status === 'live' && !phoneUi}
-    <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <!-- Floating-frame map control — top-level/unzoomed so it sits ABOVE the in-frame map (z2); the
+       float-win's own chrome lives in .ui-scale (z1) and would be hidden behind it. ✕ sends the map
+       back to main. Not while the frame is parked (the map slides out with it). -->
+  {#if mapFloating && $videoState.status === 'live' && !phoneUi && $videoState.floating}
     <div class="miniframe-ctl" style={mapFrameStyle}>
-      <button class="mf-corner mf-close" onclick={() => setMapLocation('main')} title={$t('video.close')}>✕</button>
-      <div class="mf-corner mf-resize" onpointerdown={miniResizeDown} title="Resize"></div>
+      <button class="mf-corner mf-close" style="border-top-left-radius:{5 * uiScale}px;" onclick={() => setMapLocation('main')} title={$t('video.close')}>✕</button>
+      <!-- The window's resize corner, redrawn above the map just inside the picture's top-right
+           corner (this layer is unzoomed and sits at the inner box, hence the scale offsets). -->
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <div
+        class="mf-corner mf-grip"
+        style="top:{3 * uiScale}px; right:{3 * uiScale}px; width:{26 * uiScale}px; height:{26 * uiScale}px; border-width:{floatBezel * uiScale}px; border-top-right-radius:{8 * uiScale}px;"
+        onpointerdown={(e) => startFloatResize(e, { left: floatLeft, top: floatTop, width: floatW, height: floatH, vw: logicalW, vh: logicalH })}
+        title={$t('video.resizeWindow')}
+      ></div>
     </div>
   {/if}
 
@@ -3503,7 +3492,7 @@
          it scales to the window (full height/width) without distortion — bars where aspect differs. -->
     <div
       class="map-video-wrap"
-      class:nv-active={$activeNativeSurface === 'main'}
+      class:nv-active={$activeNativeSurfaces.has('main')}
       class:unobstructed={ufActive}
       bind:clientWidth={ufWrapW}
       bind:clientHeight={ufWrapH}
@@ -3527,12 +3516,12 @@
         <!-- svelte-ignore a11y_no_static_element_interactions -->
         <div
           class="native-hole"
-          class:armed={$activeNativeSurface === 'main'}
+          class:armed={$activeNativeSurfaces.has('main')}
           use:nativeSurface={'main'}
           ondblclick={mouseDoubleClick(() => setMapLocation('main'))}
           use:doubleTap={() => setMapLocation('main')}
         >
-          {#if $activeNativeSurface !== 'main'}<span>{$t('video.sinkElsewhere')}</span>{/if}
+          {#if !$activeNativeSurfaces.has('main')}<span>{$t('video.sinkElsewhere')}</span>{/if}
         </div>
       {:else if $videoState.mjpegUrl}
         <!-- Native / MJPEG feed (no MediaStream): drawn by the off-thread reader where the WebView
@@ -3635,15 +3624,8 @@
   <!-- ======= BOTTOM WIDGET PANEL ======= -->
   <div class="zone-bottom-dock" class:zone-hidden={!$layout.bottomDock.visible} class:panel-editing={widgetEditMode} bind:clientWidth={bottomDockW} bind:clientHeight={bottomDockH} style:padding-left="{videoReserve}px">
     <div class="panel-bottom-wrap">
-      <button
-        class="widget-edit-btn widget-edit-btn--panel"
-        class:active={widgetEditMode}
-        onclick={() => widgetEditMode = !widgetEditMode}
-        title={widgetEditMode ? $t('widgets.exitEdit') : $t('widgets.editLayout')}
-      >
-        ✎
-      </button>
-
+      <!-- Edit mode (both docks share it): entered by a long-press on a widget, left by a click
+           outside the docks or Escape — the panels own the gesture, the flag lives here. -->
       <WidgetPanel
         widgetIds={panels.bottom}
         orientation="horizontal"
@@ -3653,7 +3635,7 @@
         sizes={panels.sizes ?? {}}
         bind:crossPx={bottomPanelCrossPx}
         {telem}
-        editing={widgetEditMode}
+        bind:editing={widgetEditMode}
         {interfaceSettings}
         onreorder={handleReorder}
         onreceive={handleReceive}
@@ -3663,12 +3645,8 @@
     </div>
   </div>
 
-  <!-- Persistent hidden source for native Picture-in-Picture (survives panel close) -->
-  <!-- svelte-ignore a11y_media_has_caption -->
-  <video bind:this={pipVideoEl} class="pip-source" autoplay muted playsinline></video>
-
-  <!-- ======= FLOATING VIDEO WINDOW ======= -->
-  <FloatingVideoWindow />
+  <!-- ======= FLOATING VIDEO WINDOW (+ its show/hide toggle) ======= -->
+  <FloatingVideoWindow left={floatLeft} top={floatTop} width={floatW} height={floatH} vw={logicalW} vh={logicalH} />
 
   <!-- ======= RIGHT WIDGET PANEL ======= -->
   <div class="zone-side-dock" class:zone-hidden={!$layout.sideDock.visible} class:panel-editing={widgetEditMode} bind:clientWidth={sideDockW} bind:clientHeight={sideDockH}>
@@ -3681,7 +3659,7 @@
       sizes={panels.sizes ?? {}}
       bind:crossPx={sidePanelCrossPx}
       {telem}
-      editing={widgetEditMode}
+      bind:editing={widgetEditMode}
       {interfaceSettings}
       onreorder={handleReorder}
       onreceive={handleReceive}
@@ -4072,17 +4050,25 @@
     right: calc(var(--phone-panel-w, 0px) - var(--phone-shift, 0px));
     transition: right 0.3s ease;
   }
-  /* Phone, video primary: the mini map in the docked frame parks with it — off to the right,
-     behind the column and out (the frame itself unmounts; the map layer is +page's, so it moves).
-     Touches: the mini map takes them (pinch zoom — Leaflet's dragging and double-tap zoom are off
-     in mini mode, D6) and relays a long-press to the tile underneath (PhoneWidgetPanel); while the
-     grid is in EDIT mode (html.phone-editing) the layer goes touch-free so the tile can be dragged. */
-  :global(html.is-phone) .layer-map.in-frame {
+  /* Video primary: the mini map in the floating / docked frame parks with it — off the screen (the
+     frame itself unmounts; the map layer is +page's, so it moves): left on the desktop, where the
+     window snaps bottom-left, right on the phone, behind the column and out.
+     Touches on the phone: the mini map takes them (pinch zoom — Leaflet's dragging and double-tap
+     zoom are off in mini mode, D6) and relays a long-press to the tile underneath (PhoneWidgetPanel);
+     while the grid is in EDIT mode (html.phone-editing) the layer goes touch-free so the tile can be
+     dragged. The desktop's counterpart is `.edit-passive` (map in the widget tile + dock edit mode):
+     WidgetPanel relays the long-press on the map to the tile, then the tile gets the pointer. */
+  .layer-map.in-frame {
     transition: transform 0.3s ease;
   }
   :global(html.phone-editing) .layer-map.in-frame,
-  :global(html.phone-editing) .layer-map.in-frame :global(*) {
+  :global(html.phone-editing) .layer-map.in-frame :global(*),
+  .layer-map.edit-passive,
+  .layer-map.edit-passive :global(*) {
     pointer-events: none !important;
+  }
+  .layer-map.in-frame.parked {
+    transform: translateX(-100vw);
   }
   :global(html.is-phone) .layer-map.in-frame.parked {
     transform: translateX(100vw);
@@ -4195,7 +4181,7 @@
     right: auto;
     bottom: auto; /* left/top/width/height come from the inline rect */
     z-index: 2; /* above .ui-scale (z:1): into the floating frame body; frame draws the border */
-    border-radius: 7px;
+    border-radius: 5px; /* = the frame's inner box / the widget tile */
   }
   /* Hide the Leaflet attribution while the map is in the tiny floating frame: it's illegible there
      and tapping it navigates the whole webview to an inescapable page. (Stays on the full map.) */
@@ -4237,21 +4223,26 @@
     color: #e0e0e0;
     background: rgba(0, 0, 0, 0.5);
     border: none;
-    border-radius: 8px 0 8px 0;
+    /* Outer corner = the frame's inner box (5 px, scaled inline), inner corner 8 px. */
+    border-radius: 5px 0 8px 0;
     cursor: pointer;
   }
   .mf-close:hover {
     background: rgba(212, 0, 0, 0.7);
     color: #fff;
   }
-  .mf-resize {
+  /* Same look as FloatingVideoWindow's .fw-grip: an L in the bezel (widths inline, scaled). */
+  .mf-grip {
     right: 0;
+    background: transparent;
+    border-style: solid;
+    border-color: #5e5e5e;
+    border-left: none;
+    border-bottom: none;
     cursor: nesw-resize;
-    border-radius: 0 8px 0 8px;
-    background: linear-gradient(225deg, rgba(55, 168, 219, 0.85) 42%, transparent 42%);
   }
-  .mf-resize:hover {
-    background: linear-gradient(225deg, rgba(55, 168, 219, 1) 50%, transparent 50%);
+  .mf-grip:hover {
+    border-color: #727272;
   }
   /* Full-size video shown in the content area when swapped (videoPrimary). The wrapper holds the
      chrome inset + black backdrop; the video fills it. */
@@ -4332,19 +4323,6 @@
   .map-video.mirror.rot180 {
     transform: scaleY(-1);
   }
-  /* PiP source: rendered + playing but visually out of the way (must not be
-     display:none, or it produces no frames for Picture-in-Picture). */
-  .pip-source {
-    position: absolute;
-    left: 0;
-    bottom: 0;
-    width: 1px;
-    height: 1px;
-    opacity: 0;
-    pointer-events: none;
-    z-index: -1;
-  }
-
   .zone-bottom-dock {
     grid-area: bottom-dock;
     z-index: 100;
@@ -4523,8 +4501,7 @@
     gap: 6px;
     pointer-events: auto;
   }
-  /* Phone: stack the edit button ABOVE the HUD (not beside it) so the tiles get the full dock width
-     and use the empty left space. Button sits top-right, out of the way. */
+  /* Narrow mobile: the HUD takes the full dock width. */
   @media (max-width: 600px) {
     :global(html.is-mobile) .panel-bottom-wrap {
       flex-direction: column;
@@ -4536,40 +4513,6 @@
       width: 100%;
     }
   }
-
-  /* --- Widget edit toggle button --- */
-  .widget-edit-btn {
-    width: 28px;
-    height: 28px;
-    background: rgba(46, 46, 46, 0.85);
-    border: 1px solid rgba(55, 168, 219, 0.3);
-    border-radius: 6px;
-    color: #949494;
-    font-size: 13px;
-    cursor: pointer;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    backdrop-filter: blur(8px);
-    transition: background-color 0.2s, border-color 0.2s, color 0.2s;
-  }
-
-  .widget-edit-btn--panel {
-    flex: 0 0 auto;
-    z-index: 110;
-  }
-
-  .widget-edit-btn:hover {
-    background: rgba(55, 168, 219, 0.2);
-    color: #e0e0e0;
-  }
-
-  .widget-edit-btn.active {
-    background: rgba(55, 168, 219, 0.25);
-    border-color: #37a8db;
-    color: #37a8db;
-  }
-
 
   /* --- Error Bar --- */
   .error-bar {

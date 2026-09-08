@@ -36,6 +36,20 @@ below. The release you are reading the docs for is expanded; click an older vers
         Linux and macOS — lower latency, a fraction of the CPU load, and rock-solid reconnects.
         [#85] · [#88] · [#89] · [#126]
 
+    ??? info "Video in two places at once — and on a screen of its own"
+        With Kite's own RTSP client the picture now runs in the **Video widget and a large surface at
+        the same time** — the floating window or the fullscreen swap — the way the other sources
+        always did. One decode feeds both — on Windows, macOS and Linux. [#129] · [#132] · [#133]
+
+        **And it can leave the app.** Hover the floating window and a **broken-chain button** appears
+        in its top-left corner: the frame moves out into its own window, **always on top**, framed
+        exactly like the one inside Kite. Put it beside the app or on a **second monitor, which then
+        becomes your video screen** — Kite fills it again by itself at the next start, in the same
+        place and, if you left it that way, in fullscreen. The detached window has no title bar: the
+        buttons appear when the pointer is over it — top-left brings the picture home, bottom-right
+        goes fullscreen. Drag the picture to move it, the top-right corner resizes it, and the frame
+        keeps the stream's aspect ratio. Windows and macOS. [#130] · [#132]
+
     ??? info "Telemetry API — live telemetry for other programs"
         Kite can now **serve its live telemetry as JSON** to anything that can read it: an NDJSON
         stream over TCP (port 27300), an HTTP snapshot (port 27301) and UDP subscribers (send `subscribe`, get
@@ -66,6 +80,13 @@ below. The release you are reading the docs for is expanded; click an older vers
         to the map or the fullscreen video. The compass and horizon picked up the frosted-glass look
         of the other widgets, and the old Raw Telemetry widget gave way to a **≡ Raw** button in the
         top bar: one popup with **every** value the telemetry link delivers, in its raw unit. [#101]
+
+        **The desktop adopted the phone's handling.** Starting a video source brings the floating
+        window in from the left; a single camera button next to it parks it off-screen and back
+        (the stream keeps running), the frame got the widgets' glass bezel with a resize corner, and
+        the Video panel shows the source's state, resolution, frame rate and codec instead of a
+        preview. Widgets are rearranged by **long-pressing** them — mouse or finger — with no edit
+        button any more; click outside the docks or press Escape to finish. [#127]
 
     **Added**
 
@@ -98,9 +119,32 @@ below. The release you are reading the docs for is expanded; click an older vers
       the link, the recording and the track running while Kite is minimised. [#111]
     - **High-Resolution 3D** — the globe at native pixel density (sharp on phones, tablets and
       high-DPI screens) or at half resolution for weak GPUs; Settings → Interface → Map. [#111]
+    - **Detached video window** — the floating video frame moves out of the app into its own
+      always-on-top window: put it beside Kite or on a second monitor, which then becomes your video
+      screen and is filled automatically at start. An **unplug button** appears on the floating
+      window when you hover it; the detached window's own hover buttons bring the picture back
+      (top-left) and switch to fullscreen (bottom-right). Where it stands — including fullscreen —
+      is remembered; if that screen is gone next time, it opens on Kite's own. Needs the Native RTSP
+      client, Windows and macOS. [#130] · [#132]
+    - **The video shows in two places at once** — with Kite's own RTSP client the picture now runs
+      in the Video widget **and** the floating window (or the fullscreen swap) at the same time,
+      as it always did with the other sources. One decode feeds both. [#129] · [#132] · [#133]
+    - **Desktop video window with a park button** — Start slides the window in, the camera button
+      beside it parks and recalls it while the source runs; glass bezel, resize corner, no ✕. The
+      Video panel replaces its preview with a status block (state, resolution, fps, codec, bitrate). [#127]
+    - **Long-press widget editing on the desktop** — hold a widget (mouse or touch) to enter edit
+      mode and drag it right away; the ✎ button is gone. Click outside the docks or Escape to leave. [#127]
+
+    **Removed**
+
+    - **Video window (detach)** — the old detached window was the browser's Picture-in-Picture: it
+      never worked with Kite's own RTSP client and only ever existed on Windows. A real detached
+      video window replaces it. [#129]
 
     **Improved**
 
+    - **Floating video window at UI scale above 100 %** — the snapped window landed past the bottom
+      edge of the screen; its geometry is now computed in the scaled layer's own units. [#127]
     - **Replay player folds away while playing** — a slim strip (craft, time, progress) replaces
       the panel; hover or tap the area to unfold it, paused = always open. Clicking anywhere
       outside the Logbook collapses it to its info card. [#100]
@@ -165,3 +209,8 @@ below. The release you are reading the docs for is expanded; click an older vers
 [#112]: https://github.com/b14ckyy/Kite-GC/pull/112
 [#123]: https://github.com/b14ckyy/Kite-GC/pull/123
 [#126]: https://github.com/b14ckyy/Kite-GC/pull/126
+[#127]: https://github.com/b14ckyy/Kite-GC/pull/127
+[#129]: https://github.com/b14ckyy/Kite-GC/pull/129
+[#130]: https://github.com/b14ckyy/Kite-GC/pull/130
+[#132]: https://github.com/b14ckyy/Kite-GC/pull/132
+[#133]: https://github.com/b14ckyy/Kite-GC/pull/133

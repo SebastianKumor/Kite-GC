@@ -14,9 +14,9 @@
      it) and passes it down. -->
 <script lang="ts">
   import { t } from 'svelte-i18n';
-  import { videoStream, videoState, bindVideoEl, setMapLocation, toggleFloating, reportMjpegError } from '$lib/stores/video';
+  import { videoStream, videoState, bindVideoEl, setMapLocation, toggleFloating, reportMjpegError, reportImgSize, fpsProbe } from '$lib/stores/video';
   import { canvasSink, mjpegSink } from '$lib/controllers/mjpegSink';
-  import { nativeSurface, activeNativeSurface } from '$lib/controllers/nativeVideo';
+  import { nativeSurface, activeNativeSurfaces } from '$lib/controllers/nativeVideo';
   import { doubleTap, mouseDoubleClick } from '$lib/helpers/doubleTap';
   import VideoReconnectOverlay from '$lib/components/video/VideoReconnectOverlay.svelte';
 
@@ -118,29 +118,29 @@
     class:parked
     style="left:{left}px; top:{top}px; width:{width}px; height:{height}px;"
   >
-    <div class="dw-bg" class:nv-active={$activeNativeSurface === 'floating'}></div>
+    <div class="dw-bg" class:nv-active={$activeNativeSurfaces.has('floating')}></div>
     {#if !mapHere}
       <!-- svelte-ignore a11y_no_static_element_interactions -->
       <div
         class="dw-body"
-        class:nv-active={$activeNativeSurface === 'floating'}
+        class:nv-active={$activeNativeSurfaces.has('floating')}
         ondblclick={mouseDoubleClick(() => setMapLocation('floating'))}
         use:doubleTap={() => setMapLocation('floating')}
       >
         {#if live && $videoState.nativeSink}
-          <div class="native-hole" class:armed={$activeNativeSurface === 'floating'} use:nativeSurface={'floating'}>
-            {#if $activeNativeSurface !== 'floating'}<span>{$t('video.sinkElsewhere')}</span>{/if}
+          <div class="native-hole" class:armed={$activeNativeSurfaces.has('floating')} use:nativeSurface={'floating'}>
+            {#if !$activeNativeSurfaces.has('floating')}<span>{$t('video.sinkElsewhere')}</span>{/if}
           </div>
         {:else if live && $videoState.mjpegUrl}
           {#if $canvasSink}
             <canvas use:mjpegSink class:mirror={$videoState.mirror} class:rot180={$videoState.rotate180}></canvas>
           {:else}
             <!-- svelte-ignore a11y_missing_attribute -->
-            <img src={$videoState.mjpegUrl} class:mirror={$videoState.mirror} class:rot180={$videoState.rotate180} onerror={reportMjpegError} />
+            <img src={$videoState.mjpegUrl} class:mirror={$videoState.mirror} class:rot180={$videoState.rotate180} onload={reportImgSize} onerror={reportMjpegError} />
           {/if}
         {:else if live}
           <!-- svelte-ignore a11y_media_has_caption -->
-          <video bind:this={videoEl} autoplay muted playsinline class:mirror={$videoState.mirror} class:rot180={$videoState.rotate180}></video>
+          <video bind:this={videoEl} use:fpsProbe autoplay muted playsinline class:mirror={$videoState.mirror} class:rot180={$videoState.rotate180}></video>
         {/if}
         <VideoReconnectOverlay />
       </div>

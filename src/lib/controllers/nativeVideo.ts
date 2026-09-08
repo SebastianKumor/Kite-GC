@@ -11,7 +11,7 @@
 //
 //   1. pick the ONE surface that shows the video — exactly one hardware layer exists, so the
 //      registered candidate with the highest priority wins (fullscreen map-swap > floating
-//      window > widget tile > panel preview); the others show a placeholder,
+//      window > widget tile); the others show a placeholder,
 //   2. push that surface's rect (physical px) to the backend so the native layer tracks it,
 //   3. cut the hole: a clip-path with a reversed inner ring on every DOM layer that paints
 //      UNDER the surface (the map, the surface's own glass container, the page ground) — and
@@ -22,11 +22,10 @@
 // layer behind it shows the DESKTOP through the transparent app window (spike finding).
 //
 // Layers opt in: elements carrying `data-nv-clip` are clipped wherever they intersect the
-// hole (the unzoomed map layer). The active surface's PanelShell ancestor (`.ps`, glass +
-// backdrop-filter) is picked up automatically for the panel preview. The video widget's
-// card is deliberately NOT a clip target: per-frame clip churn on its backdrop-filtered
-// glass flickered during window resizes — the armed tile paints its bezel with ring-only
-// properties instead (see VideoWidget.svelte).
+// hole (the unzoomed map layer). The video widget's card and the floating window's frame are
+// deliberately NOT clip targets: per-frame clip churn on their backdrop-filtered glass
+// flickered during window resizes — the armed surface paints its bezel with ring-only
+// properties instead (see VideoWidget.svelte / FloatingVideoWindow.svelte).
 // The page ground (`body`'s background) cannot be clipped directly — clip-path on `body`
 // would clip the whole app — so while the router runs, the body background moves onto an
 // injected fixed div behind everything, and THAT gets the hole.
@@ -41,16 +40,20 @@
 import { writable, get } from 'svelte/store';
 import { invoke } from '@tauri-apps/api/core';
 
-export type NativeSurfaceId = 'main' | 'floating' | 'widget' | 'preview';
+export type NativeSurfaceId = 'main' | 'floating' | 'widget';
 
-/** Highest first: the fullscreen map-swap view beats the floating window beats the widget
- *  tile beats the panel preview (the preview must never steal the picture from a flight
- *  surface just because the panel was opened). */
-const PRIORITY: NativeSurfaceId[] = ['main', 'floating', 'widget', 'preview'];
+/** Highest first: the fullscreen map-swap view beats the floating window beats the widget tile. */
+const PRIORITY: NativeSurfaceId[] = ['main', 'floating', 'widget'];
 
-/** The surface currently showing the native video (null = none → sink hidden). Surfaces
- *  render their transparent hole only while THEY are active, a placeholder otherwise. */
-export const activeNativeSurface = writable<NativeSurfaceId | null>(null);
+/** How many surfaces the sink serves at once (VIDEO_MULTISINK_WINDOW.md D1): the widget tile plus
+ *  one large surface. The backend caps this too — this is the polite half of the contract. */
+const MAX_SURFACES = 2;
+
+/** The surfaces the native video is presented in right now — up to two at once since the sink
+ *  became a hub (VIDEO_MULTISINK_WINDOW.md §4.3). A surface renders its transparent hole only while
+ *  it is IN this set, a placeholder otherwise, and it only joins once the backend has confirmed the
+ *  list that contains it (see `ackedKeys`) — so a hole never opens over a layer that is not there. */
+export const activeNativeSurfaces = writable<Set<NativeSurfaceId>>(new Set());
 
 /** Live geometry of the active hole for the Debug Monitor: how far the visible rect was
  *  clipped on each side (viewport px), the radius read from the surface's CSS, and which
@@ -63,7 +66,7 @@ export interface NativeHoleDebug {
   /** Which ancestor set each clipped edge (L|T|R|B) — empty side = unclipped. */
   by: string;
 }
-export const nativeHoleDebug = writable<NativeHoleDebug | null>(null);
+export const nativeHoleDebug = writable<NativeHoleDebug[]>([]);
 
 // One SET of elements per id, not one element: the phone grid re-creates the video widget when a
 // drag carries it across a page edge, and a transient instance (the drag preview) can mount and
@@ -74,7 +77,6 @@ const regs = new Map<NativeSurfaceId, Set<HTMLElement>>();
 let running = false;
 let raf = 0;
 let lastRectKey = '';
-let lastVisible: boolean | null = null;
 let groundEl: HTMLDivElement | null = null;
 /** Elements currently carrying a hole clip → the exact clip string applied. Writing style
  *  only on change matters: a same-value write still invalidates style every frame, and on
@@ -117,7 +119,8 @@ export function startNativeSurfaceRouter(): void {
   if (running || typeof window === 'undefined') return;
   running = true;
   lastRectKey = '';
-  lastVisible = null;
+  ackedKeys = new Set();
+  pending = null;
   raf = requestAnimationFrame(tick);
 }
 
@@ -128,22 +131,41 @@ export function stopNativeSurfaceRouter(): void {
   cancelAnimationFrame(raf);
   clearClips();
   removeGround();
-  activeNativeSurface.set(null);
+  activeNativeSurfaces.set(new Set());
+  ackedKeys = new Set();
 }
 
 /** Highest-priority candidate that actually has an on-screen box — a mounted but hidden
  *  surface (collapsed dock, display:none ancestor) must not win and blank the video. */
-function chosen(): { id: NativeSurfaceId; el: HTMLElement; rect: DOMRect } | null {
+interface LiveSurface {
+  id: NativeSurfaceId;
+  el: HTMLElement;
+  /** The surface's own box. */
+  rect: DOMRect;
+  /** What is left of it after every clipping ancestor — the hole, and the sink's clip box. */
+  vis: DOMRect;
+}
+
+/** Every registered surface that has an on-screen box, highest priority first and capped at what
+ *  the sink serves. One element per id: a mounted but hidden instance (collapsed dock, display:none
+ *  ancestor, the phone grid's transient drag copy) must not take the slot from the live one. */
+function visibleSurfaces(): LiveSurface[] {
+  const out: LiveSurface[] = [];
   for (const id of PRIORITY) {
     const els = regs.get(id);
     if (!els) continue;
     for (const el of els) {
       if (!el.isConnected) continue;
       const rect = el.getBoundingClientRect();
-      if (rect.width > 0 && rect.height > 0) return { id, el, rect };
+      if (rect.width <= 0 || rect.height <= 0) continue;
+      const vis = visibleRect(el, rect, id);
+      if (!vis) continue;
+      out.push({ id, el, rect, vis });
+      break;
     }
+    if (out.length >= MAX_SURFACES) break;
   }
-  return null;
+  return out;
 }
 
 /** The part of `rect` that is actually visible: intersected with every overflow-clipping
@@ -198,7 +220,14 @@ function visibleRect(el: HTMLElement, rect: DOMRect, id: NativeSurfaceId): DOMRe
   // that live INSIDE the column (the widget tile) are exempt — the column's own overflow clips
   // them, and the bound would blank them entirely.
   if (rightBound != null && id !== 'widget' && x2 > rightBound) { x2 = rightBound; byR = 'bound'; }
-  if (x2 <= x1) return null;
+  // The viewport itself: a surface sliding off the screen (the floating window parking, its
+  // transform carries it past the left edge) keeps its full box for the layout and loses the
+  // off-screen part of the clip — the sinks never see a negative or oversized visible box.
+  if (x1 < 0) { x1 = 0; byL = 'viewport'; }
+  if (y1 < 0) { y1 = 0; byT = 'viewport'; }
+  if (x2 > window.innerWidth) { x2 = window.innerWidth; byR = 'viewport'; }
+  if (y2 > window.innerHeight) { y2 = window.innerHeight; byB = 'viewport'; }
+  if (x2 <= x1 || y2 <= y1) return null;
   if (Math.abs(x1 - rect.left) < SNAP) { x1 = rect.left; byL = ''; }
   if (Math.abs(y1 - rect.top) < SNAP) { y1 = rect.top; byT = ''; }
   if (Math.abs(x2 - rect.right) < SNAP) { x2 = rect.right; byR = ''; }
@@ -209,6 +238,42 @@ function visibleRect(el: HTMLElement, rect: DOMRect, id: NativeSurfaceId): DOMRe
 
 /** Dev diagnostics: which ancestor produced each clipped edge in the last visibleRect. */
 let lastClipBy = '';
+
+// The surface list is pushed over IPC, which is a QUEUE: a drag produces a new geometry every
+// animation frame, and anything that cannot keep up turns that stream into a growing backlog — the
+// layer then trails the DOM by the whole queue instead of by a frame. So only ever ONE call is in
+// flight; while it is, the newest list is remembered and sent when it settles. Older lists are
+// simply dropped: nobody wants a position the window has already left.
+type SurfacePayload = {
+  id: NativeSurfaceId;
+  x: number; y: number; w: number; h: number;
+  cx: number; cy: number; cw: number; ch: number;
+};
+
+let inFlight = false;
+let pending: { payload: SurfacePayload[]; keys: Set<NativeSurfaceId> } | null = null;
+/** The surface set the BACKEND has confirmed. A surface cuts its hole only once it is in here —
+ *  its output exists by then, so the transparency never arrives before the picture. */
+let ackedKeys = new Set<NativeSurfaceId>();
+
+function sendSurfaces(payload: SurfacePayload[], keys: Set<NativeSurfaceId>): void {
+  if (inFlight) {
+    pending = { payload, keys };
+    return;
+  }
+  inFlight = true;
+  void invoke('video_rtsp_native_sink_surfaces', { surfaces: payload })
+    .then(() => {
+      ackedKeys = keys;
+    })
+    .catch(() => {})
+    .finally(() => {
+      inFlight = false;
+      const next = pending;
+      pending = null;
+      if (next) sendSurfaces(next.payload, next.keys);
+    });
+}
 
 /** Viewport-x (css px) beyond which no surface is visible — the phone's widget column edge; null
  *  = no bound. Set by +page (it owns the column width and its replay-player slide). */
@@ -230,87 +295,176 @@ function coverBox(el: HTMLElement, rect: DOMRect): DOMRect {
   return new DOMRect(rect.x + (rect.width - w) / 2, rect.y + (rect.height - h) / 2, w, h);
 }
 
+/** One hole to cut: whose surface it is, where it is (viewport px, device-pixel-snapped) and how
+ *  its corners round. */
+interface Hole {
+  id: NativeSurfaceId;
+  rect: DOMRect;
+  radii: HoleRadii;
+}
+
+function setsEqual(a: Set<NativeSurfaceId>, b: Set<NativeSurfaceId>): boolean {
+  return a.size === b.size && [...a].every((v) => b.has(v));
+}
+
 function tick(): void {
   if (!running) return;
-  const c = chosen();
-  if (get(activeNativeSurface) !== (c?.id ?? null)) activeNativeSurface.set(c?.id ?? null);
-  const vis = c ? visibleRect(c.el, c.rect, c.id) : null;
-  if (!c || !vis) {
-    // No surface — or the active one is scrolled entirely out of its container.
-    if (lastVisible !== false) {
-      lastVisible = false;
-      void invoke('video_rtsp_native_sink_visible', { visible: false }).catch(() => {});
-    }
-    clearClips();
-    lastRectKey = '';
-    if (import.meta.env.DEV) nativeHoleDebug.set(null); // no hole → no stale readout
-  } else {
-    // Two rects go to the sink: the surface's FULL box for video layout (aspect fit), and
-    // the VISIBLE part as a clip — a scroll-clipped surface then shows a video cut at the
-    // container edge (like scrolled DOM content), not one shrunk into the remainder.
-    // A `data-nv-cover` surface (the video widget tile) wants crop-to-fill instead of a
-    // letterbox: its full box is the aspect box that COVERS the tile, centred on it, and the
-    // tile stays the visible part — the sink lays the picture out in the full box and cuts it
-    // at the tile edge, the very path a scrolled panel uses. No sink-side change.
-    const hole = vis;
-    const full = coverBox(c.el, c.rect);
-    const dpr = window.devicePixelRatio || 1;
-    const phys = {
-      x: Math.round(full.x * dpr),
-      y: Math.round(full.y * dpr),
-      w: Math.round(full.width * dpr),
-      h: Math.round(full.height * dpr),
-      cx: Math.round(hole.x * dpr),
-      cy: Math.round(hole.y * dpr),
-      cw: Math.round(hole.width * dpr),
-      ch: Math.round(hole.height * dpr),
+  const live = visibleSurfaces();
+  const dpr = window.devicePixelRatio || 1;
+  const px = (v: number) => Math.round(v * dpr);
+
+  // Two rects go to the sink per surface: its FULL box for the video layout (aspect fit), and the
+  // VISIBLE part as a clip — a scroll-clipped surface then shows a video cut at the container edge
+  // (like scrolled DOM content), not one shrunk into the remainder. A `data-nv-cover` surface (the
+  // video widget tile) wants crop-to-fill instead of a letterbox: its full box is the aspect box
+  // that COVERS the tile, centred on it, and the tile stays the visible part.
+  const payload: SurfacePayload[] = live.map((s) => {
+    const full = coverBox(s.el, s.rect);
+    return {
+      id: s.id,
+      x: px(full.x),
+      y: px(full.y),
+      w: px(full.width),
+      h: px(full.height),
+      cx: px(s.vis.x),
+      cy: px(s.vis.y),
+      cw: px(s.vis.width),
+      ch: px(s.vis.height),
     };
-    if (lastVisible !== true) {
-      lastVisible = true;
-      void invoke('video_rtsp_native_sink_visible', { visible: true }).catch(() => {});
-    }
-    const key = `${phys.x},${phys.y},${phys.w},${phys.h},${phys.cx},${phys.cy},${phys.cw},${phys.ch}`;
-    if (key !== lastRectKey) {
-      lastRectKey = key;
-      void invoke('video_rtsp_native_sink_rect', phys).catch(() => {});
-    }
-    // Clip with the rect the NATIVE layer actually got (device-pixel-snapped): a hole a
-    // fraction wider than the native layer exposes a hairline of whatever is behind it.
-    const snapped = new DOMRect(phys.cx / dpr, phys.cy / dpr, phys.cw / dpr, phys.ch / dpr);
-    // The surface's corner rounding, in viewport px (the hole div declares it in CSS; the
-    // chrome layer may be scaled by --ui-scale). The hole is cut with these corners
-    // rounded, so the layers behind keep painting the corner caps over the native layer's
-    // square corners — the frame looks exactly like the DOM-rendered video did. A corner
-    // produced by scroll-CLIPPING is not a real corner: the video slides under the
-    // container edge there, so that edge stays square.
-    const surfScale = c.el.offsetWidth ? c.rect.width / c.el.offsetWidth : 1;
-    const radius = (parseFloat(getComputedStyle(c.el).borderTopLeftRadius) || 0) * surfScale;
-    const cutTop = hole.top > c.rect.top + 0.5;
-    const cutLeft = hole.left > c.rect.left + 0.5;
-    const cutRight = hole.right < c.rect.right - 0.5;
-    const cutBottom = hole.bottom < c.rect.bottom - 0.5;
+  });
+  const key = payload
+    .map((p) => `${p.id}:${p.x},${p.y},${p.w},${p.h},${p.cx},${p.cy},${p.cw},${p.ch}`)
+    .join('|');
+  if (key !== lastRectKey) {
+    lastRectKey = key;
+    sendSurfaces(payload, new Set(payload.map((p) => p.id)));
+  }
+
+  // Only surfaces the backend has acknowledged may go transparent (see `ackedKeys`).
+  const active = new Set(live.filter((s) => ackedKeys.has(s.id)).map((s) => s.id));
+  if (!setsEqual(get(activeNativeSurfaces), active)) activeNativeSurfaces.set(active);
+
+  const holes: Hole[] = [];
+  const dbg: NativeHoleDebug[] = [];
+  for (let i = 0; i < live.length; i++) {
+    const s = live[i];
+    if (!active.has(s.id)) continue;
+    const p = payload[i];
+    // Clip with the rect the NATIVE layer actually got (device-pixel-snapped): a hole a fraction
+    // wider than the native layer exposes a hairline of whatever is behind it.
+    const snapped = new DOMRect(p.cx / dpr, p.cy / dpr, p.cw / dpr, p.ch / dpr);
+    // The surface's corner rounding, in viewport px (the hole div declares it in CSS; the chrome
+    // layer may be scaled by --ui-scale). The hole is cut with these corners rounded, so the layers
+    // behind keep painting the corner caps over the native layer's square corners — the frame looks
+    // exactly like the DOM-rendered video did. A corner produced by scroll-CLIPPING is not a real
+    // corner: the video slides under the container edge there, so that edge stays square.
+    const surfScale = s.el.offsetWidth ? s.rect.width / s.el.offsetWidth : 1;
+    const radius = (parseFloat(getComputedStyle(s.el).borderTopLeftRadius) || 0) * surfScale;
+    const cutTop = s.vis.top > s.rect.top + 0.5;
+    const cutLeft = s.vis.left > s.rect.left + 0.5;
+    const cutRight = s.vis.right < s.rect.right - 0.5;
+    const cutBottom = s.vis.bottom < s.rect.bottom - 0.5;
+    holes.push({
+      id: s.id,
+      rect: snapped,
+      radii: {
+        tl: cutTop || cutLeft ? 0 : radius,
+        tr: cutTop || cutRight ? 0 : radius,
+        bl: cutBottom || cutLeft ? 0 : radius,
+        br: cutBottom || cutRight ? 0 : radius,
+      },
+    });
     if (import.meta.env.DEV) {
       const f = (v: number) => (Math.round(v * 100) / 100).toString();
-      const dbg: NativeHoleDebug = {
-        id: c.id,
+      dbg.push({
+        id: s.id,
         radius: Math.round(radius * 100) / 100,
         cut: [cutTop && 'T', cutLeft && 'L', cutRight && 'R', cutBottom && 'B'].filter(Boolean).join('') || '—',
-        clip: `${f(hole.left - c.rect.left)}/${f(hole.top - c.rect.top)}/${f(c.rect.right - hole.right)}/${f(c.rect.bottom - hole.bottom)}`,
+        clip: `${f(s.vis.left - s.rect.left)}/${f(s.vis.top - s.rect.top)}/${f(s.rect.right - s.vis.right)}/${f(s.rect.bottom - s.vis.bottom)}`,
         by: lastClipBy,
-      };
-      const prev = get(nativeHoleDebug);
-      if (!prev || prev.id !== dbg.id || prev.radius !== dbg.radius || prev.cut !== dbg.cut || prev.clip !== dbg.clip || prev.by !== dbg.by) {
-        nativeHoleDebug.set(dbg);
-      }
+      });
     }
-    applyClips(c.el, snapped, {
-      tl: cutTop || cutLeft ? 0 : radius,
-      tr: cutTop || cutRight ? 0 : radius,
-      bl: cutBottom || cutLeft ? 0 : radius,
-      br: cutBottom || cutRight ? 0 : radius,
-    });
+  }
+  // Topmost surface first (DOM stacking is the reverse of the priority order): the one that owns
+  // the shared pixels keeps its hole whole, the ones below it are trimmed around it.
+  applyClips(disjoint([...holes].reverse()));
+  if (import.meta.env.DEV) {
+    const prev = get(nativeHoleDebug);
+    const same =
+      prev.length === dbg.length &&
+      prev.every((h, i) => {
+        const n = dbg[i];
+        return h.id === n.id && h.radius === n.radius && h.cut === n.cut && h.clip === n.clip && h.by === n.by;
+      });
+    if (!same) nativeHoleDebug.set(dbg);
   }
   raf = requestAnimationFrame(tick);
+}
+
+
+/** How far the clip's outer ring reaches beyond the element's own box (layout px) — enough for the
+ *  bezel shadows the video surfaces paint outside theirs. */
+const OUTER_MARGIN_PX = 24;
+
+/** Two holes that OVERLAP would cancel each other out: the outer ring winds one way, each hole the
+ *  other, so a point inside both counts +1 −1 −1 and the nonzero fill rule paints it again — the map
+ *  reappeared exactly where a floating window covered the widget tile (Marc, 2026-09-08). Nothing
+ *  about the fill rule fixes that (even-odd has the same parity problem), so the holes are made
+ *  disjoint first: every hole is cut down to the parts no earlier hole already covers. The union is
+ *  unchanged, which is all the sink cares about — the topmost native layer owns the shared pixels.
+ *
+ *  Order matters beyond that: the caller passes the TOPMOST surface first, so the hole that survives
+ *  the overlap intact is the one whose layer is actually on top. `holesFor` then has a whole hole to
+ *  cut the surfaces below out of — trimming it here would leave exactly the overlap uncut, which is
+ *  where their bezels were showing through. */
+function disjoint(holes: Hole[]): Hole[] {
+  if (holes.length < 2) return holes;
+  const out: Hole[] = [];
+  for (const h of holes) {
+    let pieces = [h];
+    for (const done of out) pieces = pieces.flatMap((p) => subtractHole(p, done.rect));
+    out.push(...pieces);
+  }
+  return out;
+}
+
+/** The parts of `a` outside `b` — up to four bands, each keeping only the corner radii it still owns
+ *  (a cut edge is square, the surviving outer corners stay rounded). */
+function subtractHole(a: Hole, b: DOMRect): Hole[] {
+  const r = a.rect;
+  const ix1 = Math.max(r.left, b.left);
+  const iy1 = Math.max(r.top, b.top);
+  const ix2 = Math.min(r.right, b.right);
+  const iy2 = Math.min(r.bottom, b.bottom);
+  if (ix2 <= ix1 || iy2 <= iy1) return [a]; // no overlap
+  const out: Hole[] = [];
+  const band = (x1: number, y1: number, x2: number, y2: number) => {
+    if (x2 - x1 < 0.5 || y2 - y1 < 0.5) return; // sub-pixel slivers cut nothing
+    out.push({ id: a.id, rect: new DOMRect(x1, y1, x2 - x1, y2 - y1), radii: keptCorners(a, x1, y1, x2, y2) });
+  };
+  const midTop = Math.max(r.top, iy1);
+  const midBottom = Math.min(r.bottom, iy2);
+  band(r.left, r.top, r.right, iy1); // above
+  band(r.left, iy2, r.right, r.bottom); // below
+  band(r.left, midTop, ix1, midBottom); // left of the overlap
+  band(ix2, midTop, r.right, midBottom); // right of it
+  return out;
+}
+
+/** Which of `a`'s rounded corners the piece (x1,y1)-(x2,y2) still has; the rest go square. */
+function keptCorners(a: Hole, x1: number, y1: number, x2: number, y2: number): HoleRadii {
+  const EPS = 0.5;
+  const r = a.rect;
+  const l = Math.abs(x1 - r.left) < EPS;
+  const t = Math.abs(y1 - r.top) < EPS;
+  const ri = Math.abs(x2 - r.right) < EPS;
+  const b = Math.abs(y2 - r.bottom) < EPS;
+  return {
+    tl: l && t ? a.radii.tl : 0,
+    tr: ri && t ? a.radii.tr : 0,
+    bl: l && b ? a.radii.bl : 0,
+    br: ri && b ? a.radii.br : 0,
+  };
 }
 
 /** Per-corner rounding of the hole, viewport px (0 = square corner). */
@@ -329,18 +483,43 @@ export interface HoleRadii {
  *  `radii` is the hole's per-corner rounding in viewport px (0 = square; an SVG arc with
  *  zero radii degrades to a line per spec, so no special case is needed). Null when the
  *  element doesn't intersect the hole. */
-function holePath(el: HTMLElement, hole: DOMRect, radii: HoleRadii): string | null {
+function holePath(el: HTMLElement, holes: Hole[]): string | null {
   const b = el.getBoundingClientRect();
   if (b.width <= 0 || b.height <= 0) return null;
-  const x1 = Math.max(hole.left, b.left);
-  const y1 = Math.max(hole.top, b.top);
-  const x2 = Math.min(hole.right, b.right);
-  const y2 = Math.min(hole.bottom, b.bottom);
-  if (x2 <= x1 || y2 <= y1) return null;
   const w = el.offsetWidth || b.width;
   const h = el.offsetHeight || b.height;
   const sx = b.width / w;
   const sy = b.height / h;
+  const f = (v: number) => v.toFixed(2);
+  // Outer ring clockwise, every hole counter-clockwise inside it — the nonzero fill rule then
+  // leaves each of them unpainted, so two surfaces cut two holes out of the same layer. The ring
+  // reaches PAST the element's box: a clip path cuts an element's box-shadow as well, and the
+  // surfaces paint their opaque bezel as one (that is what the frames are made of).
+  const m = OUTER_MARGIN_PX;
+  let d = `M${f(-m)} ${f(-m)}H${f(w + m)}V${f(h + m)}H${f(-m)}Z`;
+  let cut = false;
+  for (const { rect: hole, radii } of holes) {
+    const ring = holeRing(hole, radii, b, sx, sy);
+    if (!ring) continue;
+    d += ring;
+    cut = true;
+  }
+  return cut ? `path('${d}')` : null;
+}
+
+/** One counter-clockwise ring for `hole`, in `el`'s LOCAL layout px, or null when it misses.
+ *  Clamped to the element's box PLUS the outer margin, never to the box itself: an element's bezel
+ *  is a box-shadow painted just outside its box, and a hole that stopped at the box left exactly
+ *  that ring standing — the few pixels that kept showing through the surface above (verified in a
+ *  headless render, 2026-09-08). */
+function holeRing(hole: DOMRect, radii: HoleRadii, b: DOMRect, sx: number, sy: number): string | null {
+  const mx = OUTER_MARGIN_PX * sx;
+  const my = OUTER_MARGIN_PX * sy;
+  const x1 = Math.max(hole.left, b.left - mx);
+  const y1 = Math.max(hole.top, b.top - my);
+  const x2 = Math.min(hole.right, b.right + mx);
+  const y2 = Math.min(hole.bottom, b.bottom + my);
+  if (x2 <= x1 || y2 <= y1) return null;
   const hx1 = (x1 - b.left) / sx;
   const hy1 = (y1 - b.top) / sy;
   const hx2 = (x2 - b.left) / sx;
@@ -360,7 +539,6 @@ function holePath(el: HTMLElement, hole: DOMRect, radii: HoleRadii): string | nu
   const f = (v: number) => v.toFixed(2);
   const arc = (rx: number, ry: number) => `A ${f(rx)} ${f(ry)} 0 0 0`;
   return (
-    `path('M0 0H${f(w)}V${f(h)}H0Z` +
     ` M${f(hx1 + r.tlx)} ${f(hy1)}` +
     ` ${arc(r.tlx, r.tly)} ${f(hx1)} ${f(hy1 + r.tly)}` +
     ` V${f(hy2 - r.bly)}` +
@@ -369,19 +547,35 @@ function holePath(el: HTMLElement, hole: DOMRect, radii: HoleRadii): string | nu
     ` ${arc(r.brx, r.bry)} ${f(hx2)} ${f(hy2 - r.bry)}` +
     ` V${f(hy1 + r.try_)}` +
     ` ${arc(r.trx, r.try_)} ${f(hx2 - r.trx)} ${f(hy1)}` +
-    `Z')`
+    `Z`
   );
 }
 
-function applyClips(surfaceEl: HTMLElement, hole: DOMRect, radius: HoleRadii): void {
+/** Which holes cut into `el`: all of them for a plain layer (the map, the page ground), and for an
+ *  element that BELONGS to a surface (`data-nv-clip="floating"`) only the holes of surfaces painted
+ *  ABOVE it. That is the video frames' case: the floating window's bezel used to shine through the
+ *  widget tile's hole, because the tile is transparent there and the bezel sits behind it. DOM
+ *  stacking is the reverse of the surface priority (the widget dock paints over the floating window,
+ *  which paints over the fullscreen swap), so "above me" is "later in PRIORITY". A surface must
+ *  never be cut by its OWN hole — its overlays and its bezel live exactly there. */
+function holesFor(el: HTMLElement, holes: Hole[]): Hole[] {
+  const own = el.dataset.nvClip as NativeSurfaceId | undefined;
+  const rank = own ? PRIORITY.indexOf(own) : -1;
+  if (rank < 0) return holes;
+  return holes.filter((h) => PRIORITY.indexOf(h.id) > rank);
+}
+
+function applyClips(holes: Hole[]): void {
+  if (holes.length === 0) {
+    clearClips();
+    return;
+  }
   const targets = new Set<HTMLElement>();
   for (const el of document.querySelectorAll<HTMLElement>('[data-nv-clip]')) targets.add(el);
-  // The panel preview sits on a glass PanelShell — clip that instance too.
-  const shell = surfaceEl.closest<HTMLElement>('.ps');
-  if (shell) targets.add(shell);
   targets.add(ensureGround());
   for (const el of targets) {
-    const path = holePath(el, hole, radius);
+    const mine = holesFor(el, holes);
+    const path = mine.length > 0 ? holePath(el, mine) : null;
     if (path) {
       if (clipped.get(el) !== path) {
         el.style.clipPath = path;
