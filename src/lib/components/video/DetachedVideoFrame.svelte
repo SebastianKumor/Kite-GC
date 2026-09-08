@@ -99,6 +99,9 @@
 
   let snapTimer = 0;
   let reportTimer = 0;
+  /** Once per window: the picture's first frame is also the one the Pi's GPU driver gets wrong —
+   *  see `video_detached_nudge` for what that is and why only this window needs it. */
+  let nudged = false;
 
   /** Overlay chrome visible? Driven by pointer activity, not by CSS `:hover`: WebKitGTK does not
    *  reliably deliver a leave event when the pointer leaves the window, so the buttons stayed on
@@ -126,6 +129,13 @@
     if (!aspect || fullscreen) return;
     clearTimeout(snapTimer);
     snapTimer = window.setTimeout(() => void snapAspect(), SNAP_IDLE_MS);
+  });
+
+  // The picture is on screen: clear the framebuffer the driver may have filled with garbage.
+  $effect(() => {
+    if (!armed || nudged) return;
+    nudged = true;
+    void invoke('video_detached_nudge').catch(() => {});
   });
 
   // Whenever the page's own hit areas change — the chrome coming and going, fullscreen swallowing

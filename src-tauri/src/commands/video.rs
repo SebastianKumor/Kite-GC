@@ -623,6 +623,52 @@ pub fn video_detached_aspect(app: AppHandle, aspect: f64, ring: f64) {
     let _ = (app, aspect, ring);
 }
 
+/// Shake the detached window's size once, so its WebView gets a fresh framebuffer.
+///
+/// WebKitGTK's DMABUF renderer paints garbage into the first buffer the Pi's v3d driver hands it —
+/// scanline corruption over the whole page, reproduced on that hardware for months (the Jarvis
+/// dashboard carries the same workaround). It is not permanent: ANY change of the draw area's size
+/// forces the buffer to be built again and the picture is clean from then on. Kite's main window
+/// never shows it because it repaints constantly and clears the buffer by itself; the detached
+/// window's page is static and almost entirely transparent, so nothing ever forces a new buffer and
+/// the corruption stays for the life of the window (Marc, Pi 5, 2026-09-08).
+///
+/// Windowed, two pixels wider and back: the aspect lock pulls the height along, so one axis is
+/// enough and the window lands exactly where it started. Fullscreen, the compositor owns the size —
+/// the only size change left to a client is leaving fullscreen and going back in.
+///
+/// ARM Linux only: no other platform has this driver.
+#[tauri::command]
+pub fn video_detached_nudge(app: AppHandle) {
+    #[cfg(target_os = "linux")]
+    {
+        use tauri::Manager;
+
+        // A runtime test, not a `cfg`: this way the workaround is compiled and type-checked on every
+        // Linux, and const-folded away where it can never apply.
+        if !cfg!(target_arch = "aarch64") {
+            return;
+        }
+        let Some(win) = app.get_webview_window(DETACHED_LABEL) else { return };
+        // Off the caller's thread: both halves need the compositor to have acted in between.
+        std::thread::spawn(move || {
+            let settle = std::time::Duration::from_millis(220);
+            if win.is_fullscreen().unwrap_or(false) {
+                let _ = win.set_fullscreen(false);
+                std::thread::sleep(settle);
+                let _ = win.set_fullscreen(true);
+                return;
+            }
+            let Ok(size) = win.inner_size() else { return };
+            let _ = win.set_size(tauri::PhysicalSize::new(size.width + 2, size.height));
+            std::thread::sleep(settle);
+            let _ = win.set_size(size);
+        });
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = app;
+}
+
 /// The page's layout, as [`video_detached_chrome`] takes it. Only Linux reads the rects — the other
 /// platforms take their window gestures from the page itself and never need to know.
 #[derive(serde::Deserialize)]
