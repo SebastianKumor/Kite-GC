@@ -12,6 +12,9 @@
 #                    and moves "latest" onto it; older minors stay frozen on gh-pages as-is.
 #   docs-only fix  → lands on master (see contributing.md) and redeploys the current minor,
 #                    keeping the published release docs correct between releases.
+#   release branch → a workflow_dispatch on a release/x.y branch or tag redeploys THAT minor only.
+#                    "Dev" is always the master tip, so the Dev deploy is skipped on every other
+#                    ref (a dispatch there must not overwrite Dev with the patch line's docs).
 #
 # Local preview needs no CI: `mkdocs serve` (single version, see docs/requirements.txt) or
 # `mike serve` (the full versioned site from a local gh-pages branch).
@@ -67,6 +70,7 @@ jobs:
           # Release channel: the changelog hides "in development" sections (docs/hooks/changelog_channel.py).
           KITE_DOCS_CHANNEL: release
       - name: Deploy the development docs (Dev = master tip)
+        if: github.ref == 'refs/heads/master'
         run: mike deploy --push --title Dev dev
       - name: Point the site root at the latest release
         run: mike set-default --push latest
