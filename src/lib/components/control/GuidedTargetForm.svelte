@@ -9,7 +9,7 @@
   // `guidedParams` store so the last values persist for the next click. See VEHICLE_CONTROL.md.
   import { t } from 'svelte-i18n';
   import NumberStepper from '$lib/components/NumberStepper.svelte';
-  import { guidedParams, type GuidedParams } from '$lib/controllers/vehicleControl';
+  import { guidedParams, fcLoiterRadius, type GuidedParams } from '$lib/controllers/vehicleControl';
 
   let {
     lat,
@@ -26,7 +26,11 @@
 
   let alt = $state($guidedParams.alt);
   let yaw = $state<number>($guidedParams.yaw ?? NaN);
-  let radius = $state<number>($guidedParams.loiterRadius ?? NaN);
+  // Seed the radius from the FC's own default (WP_LOITER_RAD / NAV_LOITER_RAD, already read into
+  // `fcLoiterRadius` for the loiter ring) when this session has no explicit value yet. The field used
+  // to open blank, which reads as "no radius" while the vehicle will in fact use its configured one:
+  // showing that number is both the honest default and the one the aircraft is about to fly.
+  let radius = $state<number>($guidedParams.loiterRadius ?? $fcLoiterRadius ?? NaN);
 
   function fly() {
     const p: GuidedParams = {
@@ -67,6 +71,9 @@
   .gtf-fields {
     display: flex;
     gap: 10px;
+    /* Wrap rather than overflow: the steppers are fixed-width, so if the popup is ever narrower
+       than the pair needs, the second field drops to its own line instead of being clipped. */
+    flex-wrap: wrap;
   }
   .gtf-fly {
     width: 100%;
