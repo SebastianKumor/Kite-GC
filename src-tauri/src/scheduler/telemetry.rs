@@ -606,7 +606,7 @@ fn decode_gps_statistics(payload: &[u8]) -> TelemetryPayload {
     // eph (16–17) / epv (18–19) ride along in the same message — captured for the recorder.
     let eph = if payload.len() >= 18 { Some(read_u16(payload, 16) as f64) } else { None };
     let epv = if payload.len() >= 20 { Some(read_u16(payload, 18) as f64) } else { None };
-    eprintln!("[GPS-STATS] hdop_raw={} hdop={:.2} eph={:?} epv={:?}", hdop_raw, hdop, eph, epv);
+    log::debug!("[GPS-STATS] hdop_raw={} hdop={:.2} eph={:?} epv={:?}", hdop_raw, hdop, eph, epv);
     TelemetryPayload::GpsStats(GpsStatsData { hdop, eph, epv })
 }
 

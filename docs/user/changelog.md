@@ -114,15 +114,16 @@ below. The release you are reading the docs for is expanded; click an older vers
 
     - **HDOP on INAV showed the wrong figure.** The GPS tile read the position-error field instead
       of HDOP, because the first field of INAV's GPS statistics message is 16 bits and Kite decoded
-      it as 32. The recorder stored the same two values one field out. [#PRNUM]
+      it as 32. The recorder stored the same two values one field out. [#143]
     - **"Fly Here" opened with an empty radius field** on fixed wing, which reads as "no radius"
-      while the vehicle would in fact use its configured one. It now starts at the aircraft's own
-      loiter radius, and an explicit value from this session still wins. [#PRNUM]
+      while the vehicle would in fact use its configured one. The field now shows the aircraft's own
+      loiter radius. Leave it alone and the aircraft keeps using that setting, turn direction
+      included; type a value and yours wins. [#143]
     - **The radius stepper was clipped** by the edge of the "Fly Here" popup, so its "+" button
-      could not be reached. [#PRNUM]
+      could not be reached. [#143]
     - **A saved Telemetry connection came back as MSP.** Restoring the last-used protocol mapped
       everything that was not MAVLink onto MSP, so the passive Telemetry choice was silently
-      rewritten. [#PRNUM]
+      rewritten. [#143]
 
 ??? note "1.0.0 — Initial release"
 
@@ -152,3 +153,4 @@ below. The release you are reading the docs for is expanded; click an older vers
 [#105]: https://github.com/b14ckyy/Kite-GC/pull/105
 [#111]: https://github.com/b14ckyy/Kite-GC/pull/111
 [#112]: https://github.com/b14ckyy/Kite-GC/pull/112
+[#143]: https://github.com/b14ckyy/Kite-GC/pull/143
