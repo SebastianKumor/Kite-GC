@@ -41,6 +41,12 @@ is cut from the release **tag**, not from `master`, so it carries exactly what u
 Every fix merged there is merged forward into `development` afterwards, so nothing is lost. A fix that
 only matters for the next release goes to `development` like any other change.
 
+Maintenance branches are long-lived: a release line receives patches until the **second** feature
+release after it has shipped (1.0.x until 1.2.0 — see [Release support](../release-support.md)), and
+its branch stays open until then. Two lines are maintained side by side, so a bug that exists in both
+gets a fix on each maintenance branch. That is why the regression marker below matters: it tells us at
+a glance which lines a fix belongs to.
+
 **Documentation is the one exception.** A change to these pages that touches no code — a correction, a
 clarification, a missing note — targets `master` directly, because the published site must always
 describe the released app. Documentation *for a new or changed feature* is not covered by this: it

@@ -26,6 +26,8 @@ Work on 1.1 (mobile, native video decode, and more) continues on the integration
   install if you want to try the development state.
 - **A fix for the released 1.0** → pull request against **`release/1.0.x`**, the maintenance branch cut
   from the `v1.0.0` tag. Patch releases are tagged from it, and it is merged forward into `development`.
+  1.0 stays maintained until 1.2.0 ships — see
+  **[Release support](https://b14ckyy.github.io/Kite-GC/release-support/)** for the policy.
 
 Nobody commits to either branch directly — see
 **[Contributing](https://b14ckyy.github.io/Kite-GC/for-developers/contributing/)** for the full

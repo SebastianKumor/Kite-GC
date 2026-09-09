@@ -3,6 +3,10 @@
 What's new in each Kite Ground Control release — the big features up top, the full list of changes
 below. The release you are reading the docs for is expanded; click an older version to unfold it.
 
+Each version heading ends with the line's support status — **Live**, **Maintenance** or **EOL** — as
+defined on the [release support](release-support.md) page. Patch releases (1.0.1, 1.0.2, …) are listed
+inside the box of the feature release they belong to, so the notes for one release line stay together.
+
 ???+ note "1.1.0 — in development"
 
     **Highlights**
@@ -163,7 +167,7 @@ below. The release you are reading the docs for is expanded; click an older vers
       and after any packet loss the video pauses until the next keyframe instead of freezing the
       Pi's hardware decoder. Kernel-side report: raspberrypi/linux#7609. [#112]
 
-??? note "1.0.0 — Initial release"
+??? note "1.0.0 — Initial release · Live"
 
     The first stable release of **Kite Ground Control**: a cross-platform ground station for
     **INAV**, **ArduPilot** and **PX4** — live telemetry over serial, Bluetooth and network links,
