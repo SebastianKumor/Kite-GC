@@ -734,7 +734,13 @@
   const saved = get(settings);
   selectedPort = saved.lastPort;
   selectedBaud = saved.lastBaud;
-  selectedProtocol = (saved.lastProtocol === 'mavlink' ? 'mavlink' : 'msp') as ProtocolType;
+  // Honour any protocol we actually support. The old form mapped everything that was not 'mavlink'
+  // onto 'msp', which silently rewrote a stored 'telemetry' choice: a user who last connected in
+  // passive Telemetry mode came back to MSP selected. MSP stays the fallback for an unrecognised or
+  // missing value, so a fresh install is unchanged.
+  selectedProtocol = (saved.lastProtocol === 'mavlink' || saved.lastProtocol === 'telemetry'
+    ? saved.lastProtocol
+    : 'msp') as ProtocolType;
   // Restore the full last-used connection path so nothing has to be re-entered.
   if (saved.lastTransport === 'serial' || saved.lastTransport === 'tcp' || saved.lastTransport === 'udp' || saved.lastTransport === 'ble') {
     selectedTransport = saved.lastTransport;
