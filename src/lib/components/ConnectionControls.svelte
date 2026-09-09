@@ -93,6 +93,29 @@
     void selectedTransport;
     editingBt = false;
   });
+
+  // ── Network port defaults ──────────────────────────────────────────
+  // The standard port depends on the protocol as well as the transport: MAVLink is UDP 14550 or,
+  // over TCP, the SITL port 5760, while MSP over TCP is INAV SITL's 5761. The port used to follow
+  // the transport alone, so selecting MAVLink over TCP still offered the MSP port and the pilot had
+  // to know the right number. Telemetry is passive and has no port of its own, so it keeps whatever
+  // is set.
+  const NET_DEFAULTS: Record<string, number> = {
+    'mavlink:udp': 14550,
+    'mavlink:tcp': 5760,
+    'msp:udp': 14550,
+    'msp:tcp': 5761,
+  };
+  const KNOWN_PORTS = new Set(Object.values(NET_DEFAULTS));
+
+  /** Move the port to the default for the current protocol + transport, but only when it is itself
+   *  one of those defaults: a hand-typed port (a second SITL on 5762, a bridge, a UDP forwarder)
+   *  must survive both selections untouched. */
+  function redefaultPort() {
+    if (!KNOWN_PORTS.has(tcpPort)) return;
+    const next = NET_DEFAULTS[`${selectedProtocol}:${selectedTransport}`];
+    if (next) tcpPort = next;
+  }
 </script>
 
 <!-- Protocol selector + transport type (row 1 when stacked). -->
@@ -101,17 +124,12 @@
   <SegmentedToggle
     options={[{ value: 'msp', label: 'MSP' }, { value: 'mavlink', label: 'MAVLink' }, { value: 'telemetry', label: 'Telemetry' }]}
     value={selectedProtocol}
-    onchange={(v) => (selectedProtocol = v as ProtocolType)}
+    onchange={(v) => { selectedProtocol = v as ProtocolType; redefaultPort(); }}
   />
 
-  <!-- Switching between TCP/UDP flips the port between the two known defaults (TCP 5761 ⇄ UDP 14550
-       = the MAVLink convention) — a custom port (e.g. SITL 5762) is left untouched.
-       Protocol-independent (MSP has no standard network port). -->
+  <!-- Both selectors re-default the network port (see NET_DEFAULTS): a custom port is left alone. -->
   <select class="tb-select transport-select" bind:value={selectedTransport}
-    onchange={() => {
-      if (selectedTransport === 'udp' && tcpPort === 5761) tcpPort = 14550;
-      else if (selectedTransport === 'tcp' && tcpPort === 14550) tcpPort = 5761;
-    }}>
+    onchange={redefaultPort}>
     <!-- Serial is a capability, not a form factor: desktop and Android (USB host / OTG) have
          it, iOS does not. BLE and TCP/UDP exist everywhere. -->
     {#if hasSerialPorts}

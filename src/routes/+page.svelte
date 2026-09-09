@@ -878,17 +878,22 @@
   // One geolocation check at app start (refreshes the persisted user location for Night-Mode auto).
   ensureUserLocation();
 
+  /** Protocol the connection bar starts on. Settings → Connection owns the choice: "Last used"
+   *  (the default, and the behaviour Kite has always had) restores the stored protocol, while a
+   *  fixed value wins over that store on every launch. Only a protocol we actually support is
+   *  honoured, with MSP as the fallback: the old form mapped everything that was not MAVLink onto
+   *  MSP, which silently rewrote a stored `telemetry` choice, so a pilot who last connected in
+   *  passive Telemetry mode came back to MSP selected. */
+  function resolveStartupProtocol(s: AppSettings): ProtocolType {
+    const wanted = s.defaultProtocol === 'last' ? s.lastProtocol : s.defaultProtocol;
+    return wanted === 'mavlink' || wanted === 'telemetry' ? wanted : 'msp';
+  }
+
   // Restore persisted settings
   const saved = get(settings);
   selectedPort = saved.lastPort;
   selectedBaud = saved.lastBaud;
-  // Honour any protocol we actually support. The old form mapped everything that was not 'mavlink'
-  // onto 'msp', which silently rewrote a stored 'telemetry' choice: a user who last connected in
-  // passive Telemetry mode came back to MSP selected. MSP stays the fallback for an unrecognised or
-  // missing value, so a fresh install is unchanged.
-  selectedProtocol = (saved.lastProtocol === 'mavlink' || saved.lastProtocol === 'telemetry'
-    ? saved.lastProtocol
-    : 'msp') as ProtocolType;
+  selectedProtocol = resolveStartupProtocol(saved);
   // Restore the full last-used connection path so nothing has to be re-entered. A serial value is only
   // honoured where serial ports exist (iOS has none — a value synced over from a desktop is ignored);
   // TCP/UDP/BLE are valid everywhere.
@@ -3742,6 +3747,7 @@
             {gcsMode}
             userLocation={$userGeoLocation}
             onGeoCheck={requestUserLocation}
+            defaultProtocol={$settings.defaultProtocol}
             {attitudeRateHz}
             {positionRateHz}
             {airspeedEnabled}
