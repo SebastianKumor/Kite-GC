@@ -15,6 +15,7 @@
   import ConnectionStatusBox from '$lib/components/ConnectionStatusBox.svelte';
   import { hasSerialPorts } from '$lib/platform';
   import { settings } from '$lib/stores/settings';
+  import { defaultNetPort } from '$lib/stores/connection';
   import type { PortInfo, BleDeviceInfo, TransportType, ProtocolType } from '$lib/stores/connection';
   import type { TelemetryData } from '$lib/stores/telemetry';
 
@@ -31,6 +32,7 @@
     selectedBaud = $bindable(),
     tcpHost = $bindable(),
     tcpPort = $bindable(),
+    portIsAuto = $bindable(true),
     selectedBleDevice = $bindable(),
     baudRates,
     onConnect,
@@ -49,6 +51,9 @@
     selectedBaud: number;
     tcpHost: string;
     tcpPort: number;
+    /** False once the pilot has typed a port: Kite then stops moving it with the selection. Lives in
+     *  +page so both instances of these controls (toolbar and phone popout) share one answer. */
+    portIsAuto?: boolean;
     selectedBleDevice: string;
     baudRates: number[];
     onConnect: () => void;
@@ -95,25 +100,18 @@
   });
 
   // ── Network port defaults ──────────────────────────────────────────
-  // The standard port depends on the protocol as well as the transport: MAVLink is UDP 14550 or,
-  // over TCP, the SITL port 5760, while MSP over TCP is INAV SITL's 5761. The port used to follow
-  // the transport alone, so selecting MAVLink over TCP still offered the MSP port and the pilot had
-  // to know the right number. Telemetry is passive and has no port of its own, so it keeps whatever
-  // is set.
-  const NET_DEFAULTS: Record<string, number> = {
-    'mavlink:udp': 14550,
-    'mavlink:tcp': 5760,
-    'msp:udp': 14550,
-    'msp:tcp': 5761,
-  };
-  const KNOWN_PORTS = new Set(Object.values(NET_DEFAULTS));
-
-  /** Move the port to the default for the current protocol + transport, but only when it is itself
-   *  one of those defaults: a hand-typed port (a second SITL on 5762, a bridge, a UDP forwarder)
-   *  must survive both selections untouched. */
+  // The standard port depends on the protocol as well as the transport (see `defaultNetPort`):
+  // MAVLink is UDP 14550 or, over TCP, the SITL port 5760, while MSP over TCP is INAV SITL's 5761.
+  // The port used to follow the transport alone, so selecting MAVLink over TCP still offered the MSP
+  // port and the pilot had to know the right number.
+  //
+  // Whether the port may be moved is tracked in `portIsAuto` rather than guessed from the number.
+  // Guessing cannot work: 5760 is ArduPilot SITL's port *and* a perfectly deliberate choice for an
+  // MSP bridge, so a pilot who typed it would have had it silently rewritten on the next switch.
+  /** Move the port to the default for the current selection, unless the pilot typed one. */
   function redefaultPort() {
-    if (!KNOWN_PORTS.has(tcpPort)) return;
-    const next = NET_DEFAULTS[`${selectedProtocol}:${selectedTransport}`];
+    if (!portIsAuto) return;
+    const next = defaultNetPort(selectedProtocol, selectedTransport);
     if (next) tcpPort = next;
   }
 </script>
@@ -127,9 +125,10 @@
     onchange={(v) => { selectedProtocol = v as ProtocolType; redefaultPort(); }}
   />
 
-  <!-- Both selectors re-default the network port (see NET_DEFAULTS): a custom port is left alone. -->
+  <!-- Both selectors re-default the network port: a port the pilot typed is left alone. -->
   <select class="tb-select transport-select" bind:value={selectedTransport}
-    onchange={redefaultPort}>
+    onchange={redefaultPort}
+  >
     <!-- Serial is a capability, not a form factor: desktop and Android (USB host / OTG) have
          it, iOS does not. BLE and TCP/UDP exist everywhere. -->
     {#if hasSerialPorts}
@@ -183,10 +182,12 @@
       bind:value={tcpHost}
       placeholder="Host (z.B. 192.168.1.1)"
     />
+    <!-- Typing here makes the port the pilot's: the selectors stop moving it from now on. -->
     <input
       class="tb-input port-input"
       type="number"
       bind:value={tcpPort}
+      oninput={() => (portIsAuto = false)}
       placeholder="Port"
       min="1"
       max="65535"

@@ -325,6 +325,10 @@ export interface AppSettings {
   lastTransport: string;
   lastHost: string;
   lastTcpPort: number;
+  /** Was `lastTcpPort` filled in by Kite (so the protocol / transport selectors may move it), or
+   *  typed by the pilot? Optional on purpose: absent means a profile written before this existed,
+   *  and startup infers it from the stored port instead of assuming. */
+  lastPortIsAuto?: boolean;
   lastBleDevice: string;
   /** User-assigned names for Bluetooth SPP COM ports, keyed by COM path (e.g. "COM7" → "Goggles").
    *  Only outgoing BT SPP ports are renameable; physical ports keep their device descriptors. */
