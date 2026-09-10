@@ -108,6 +108,14 @@
   // Whether the port may be moved is tracked in `portIsAuto` rather than guessed from the number.
   // Guessing cannot work: 5760 is ArduPilot SITL's port *and* a perfectly deliberate choice for an
   // MSP bridge, so a pilot who typed it would have had it silently rewritten on the next switch.
+  /** Hand the port back to Kite when the typed value is the standard one for the current selection.
+   *  Without this there is no way back once anything has been typed, where going by the number at
+   *  least had one, and an older profile stored on the previous transport-only default (MAVLink over
+   *  TCP on 5761) would lose the re-defaulting for good. */
+  function notePortEdit(typed: number) {
+    portIsAuto = typed === defaultNetPort(selectedProtocol, selectedTransport);
+  }
+
   /** Move the port to the default for the current selection, unless the pilot typed one. */
   function redefaultPort() {
     if (!portIsAuto) return;
@@ -182,12 +190,13 @@
       bind:value={tcpHost}
       placeholder="Host (z.B. 192.168.1.1)"
     />
-    <!-- Typing here makes the port the pilot's: the selectors stop moving it from now on. -->
+    <!-- Typing here makes the port the pilot's and the selectors stop moving it, unless what was
+         typed is the standard port for the current selection, which hands it back to Kite. -->
     <input
       class="tb-input port-input"
       type="number"
       bind:value={tcpPort}
-      oninput={() => (portIsAuto = false)}
+      oninput={(e) => notePortEdit(Number((e.currentTarget as HTMLInputElement).value))}
       placeholder="Port"
       min="1"
       max="65535"

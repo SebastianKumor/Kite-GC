@@ -105,8 +105,9 @@ Kite fills in the usual default and swaps it when you change either the protocol
 **Telemetry** is passive and has no port of its own, so choosing it leaves the port alone.
 
 A custom port you've typed (for example a second **SITL on `5762`**) is left untouched by both
-selectors, and stays yours across restarts. Kite remembers that you typed it rather than going by the
-number, so even a port that happens to match one of the defaults above is left alone.
+selectors, and stays yours across restarts: Kite remembers that you typed it rather than going by the
+number. Type the standard port for the current selection and it goes back to following the
+selectors, so there is always a way back.
 
 If **Settings → Connection → Default Protocol** is pinned, the port follows it at startup, the same
 way it follows the selectors.
