@@ -111,6 +111,20 @@ inside the box of the feature release they belong to, so the notes for one relea
         line of the version you run: 2.0.0 is told about 2.0.1, never about 2.1.0. The default stays
         *Stable releases*. [#162]
 
+    ??? info "INAV over ELRS, mLRS, SiK or Wi-Fi — the full planner on a MAVLink-only link"
+        ELRS and mLRS in MAVLink mode, SiK radios and MAVLink Wi-Fi bridges carry no MSP — and MSP is
+        what an INAV flight controller needs for missions, safe homes and geozones. Until now such a
+        link gave you INAV's MAVLink emulation only: telemetry, but no planner. **INAV 10.0** can carry
+        MSP inside the MAVLink stream, and Kite uses that by itself: connect with the **MAVLink**
+        protocol as you would for ArduPilot, and when the flight controller answers on the tunnel the
+        status shows **MSP/MAV**, UAV Info lists the real INAV version, board and craft name, and
+        mission upload and download (EEPROM and multi-mission included), safe homes, geozones, craft
+        name and flight statistics work as over a direct MSP link. Telemetry stays MAVLink — nothing
+        is polled through the tunnel, so the radio carries no extra load in flight. Needs INAV 10.0 or
+        newer and a MAVLink telemetry port on MAVLink 2 (the default). RC control from Kite and the
+        flight controller's own ADS-B receiver are not on this path yet. Setup and limits:
+        [Connecting → INAV over MAVLink](guides/connecting.md#inav-over-mavlink-mspmav). [#202]
+
     **Added**
 
     - **Android support** — native app with USB serial, Bluetooth LE and Wi-Fi links, touch layout
