@@ -282,12 +282,12 @@ inside the box of the feature release they belong to, so the notes for one relea
       source heard in the last ten seconds (several SITL instances or bridges on one port each speak from
       their own socket; before, only the last one to speak got them). Contributed by dldnjsxo95. [#194] · [#204]
     - **PX4: take-off and land no longer head for 0°N 0°E, missions with unset yaw or action items
-      upload, integer parameters read and write correctly, and the RC panel shows COM_RC_IN_MODE with a
-      one-click fix when it blocks joystick input.** A geofence or rally save whose parameters the
-      vehicle does not take now reports those parameters as a warning instead of failing after the
-      geometry is already on the vehicle. For ArduPilot too: mission, fence and rally transfers address
-      the autopilot component, so they pass through a routing relay such as Mission Planner's MAVLink
-      mirror. Contributed by dldnjsxo95. [#195] · [#205]
+      upload, integer parameters read and write correctly, and the desktop RC panel shows COM_RC_IN_MODE
+      with a one-click fix when it blocks joystick input.** A geofence or rally save now lists the
+      parameters Kite could not write (on PX4: ones the vehicle does not report) as a warning instead of
+      failing after the geometry is already on the vehicle. For ArduPilot too: mission, fence and rally
+      transfers address the autopilot component, so they pass through a routing relay such as Mission
+      Planner's MAVLink mirror. Contributed by dldnjsxo95. [#195] · [#205]
 
 ??? note "1.0 — Initial release · Live"
 
