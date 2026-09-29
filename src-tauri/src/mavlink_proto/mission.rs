@@ -455,10 +455,14 @@ fn wp_to_item(wp: &ArduWaypoint, seq: u16, target: u8, mission_type: MavMissionT
 // of a hand-maintained whitelist. This preserves any command the FC sends — including ones Kite has
 // no dedicated editor for yet — on download→upload, instead of silently rewriting them to a plain
 // waypoint. Truly-unknown values (not in the dialect) fall back to a safe default.
-/// Position items whose param4 is a yaw angle: WAYPOINT, LOITER_UNLIM, LAND, TAKEOFF, VTOL_TAKEOFF/LAND.
-/// Not LOITER_TURNS/TIME (param4 = xtrack location) and not SPLINE_WAYPOINT (param4 unused).
+/// Position items whose param4 PX4 reads as a yaw angle (`parse_mavlink_mission_item`): WAYPOINT,
+/// LOITER_UNLIM, LAND, TAKEOFF, VTOL_TAKEOFF/LAND — and LOITER_TIME: the dialect says "xtrack location"
+/// there, but PX4 up to 1.17 reads param4 as the loiter yaw as well (`yaw = wrap_2pi(radians(param4))`,
+/// fixed in 1.18 by PX4 #27455), so a 0 makes a multicopter turn north for the loiter; NaN gives no yaw
+/// and xtrack 0 on every version. Not LOITER_TURNS / SPLINE_WAYPOINT (PX4 rejects both as UNSUPPORTED).
+/// Only consulted on the PX4 path (see `wp_to_item`).
 fn cmd_yaw_in_param4(cmd: u16) -> bool {
-    matches!(cmd, 16 | 17 | 21 | 22 | 84 | 85)
+    matches!(cmd, 16 | 17 | 19 | 21 | 22 | 84 | 85)
 }
 
 fn u8_to_frame(v: u8) -> MavFrame {
@@ -467,4 +471,40 @@ fn u8_to_frame(v: u8) -> MavFrame {
 
 fn u16_to_cmd(v: u16) -> MavCmd {
     MavCmd::from_u16(v).unwrap_or(MavCmd::MAV_CMD_NAV_WAYPOINT)
+}
+
+#[cfg(test)]
+mod param4_tests {
+    use super::*;
+
+    fn wp(command: u16, param4: f32) -> ArduWaypoint {
+        ArduWaypoint {
+            command, frame: 3, param1: 0.0, param2: 0.0, param3: 0.0, param4,
+            lat: 0, lon: 0, alt: 50.0, autocontinue: true,
+        }
+    }
+
+    fn param4_out(command: u16, param4: f32, px4: bool) -> f32 {
+        wp_to_item(&wp(command, param4), 1, 1, MavMissionType::MAV_MISSION_TYPE_MISSION, px4).param4
+    }
+
+    #[test]
+    fn px4_unset_yaw_goes_out_as_nan_on_yaw_items_including_loiter_time() {
+        for cmd in [16u16, 17, 19, 21, 22, 84, 85] {
+            assert!(param4_out(cmd, 0.0, true).is_nan(), "cmd {cmd}");
+        }
+    }
+
+    #[test]
+    fn px4_explicit_yaw_and_non_yaw_items_pass_through() {
+        assert_eq!(param4_out(16, 90.0, true), 90.0);
+        assert_eq!(param4_out(31, 0.0, true), 0.0); // LOITER_TO_ALT: param4 = xtrack only
+        assert_eq!(param4_out(178, 0.0, true), 0.0); // DO_CHANGE_SPEED
+    }
+
+    #[test]
+    fn ardupilot_param4_is_never_touched() {
+        assert_eq!(param4_out(16, 0.0, false), 0.0);
+        assert_eq!(param4_out(19, 0.0, false), 0.0);
+    }
 }
