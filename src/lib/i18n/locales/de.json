@@ -451,6 +451,7 @@
     "saveTitle": "Geozonen auf FC speichern",
     "saveMsg": "Alle Geozonen auf den Flight Controller schreiben, ins EEPROM speichern und zum Übernehmen neu starten? Geozonen werden erst nach einem Reboot aktiv — der FC startet neu und die Verbindung trennt sich.",
     "saveConfirm": "Speichern & Neustart",
+    "saveFailed": "Speichern auf dem FC fehlgeschlagen: {error}",
     "armedLocked": "Geozonen-Bearbeitung ist im Armed-Zustand deaktiviert.",
     "errTooManyZones": "Zu viele Zonen (max. {max})",
     "errTooManyVertices": "Zu viele Eckpunkte insgesamt: {n} (max. {max})",
@@ -515,6 +516,7 @@
     "saveTitle": "Geofence auf FC speichern",
     "saveMsg": "Alle Fence-Zonen und Parameter auf den Flight Controller schreiben?",
     "saveConfirm": "Speichern",
+    "saveFailed": "Speichern auf dem FC fehlgeschlagen: {error}",
     "armedLocked": "Fence-Bearbeitung ist im Armed-Zustand deaktiviert.",
     "breach": "Geofence-Verletzung"
   },
@@ -533,6 +535,7 @@
     "saveTitle": "Rally-Punkte auf FC speichern",
     "saveMsg": "Alle Rally-Punkte und Parameter auf den Flight Controller schreiben?",
     "saveConfirm": "Speichern",
+    "saveFailed": "Speichern auf dem FC fehlgeschlagen: {error}",
     "armedLocked": "Rally-Bearbeitung ist im Armed-Zustand deaktiviert."
   },
   "about": {

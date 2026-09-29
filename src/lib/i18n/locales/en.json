@@ -451,6 +451,7 @@
     "saveTitle": "Save geozones to FC",
     "saveMsg": "Write all geozones to the flight controller, save to EEPROM and reboot to apply? Geozones only take effect after a reboot, so the FC will restart and the link will drop.",
     "saveConfirm": "Save & reboot",
+    "saveFailed": "Saving to the FC failed: {error}",
     "armedLocked": "Geozone editing is disabled while armed.",
     "errTooManyZones": "Too many zones (max {max})",
     "errTooManyVertices": "Too many vertices total: {n} (max {max})",
@@ -515,6 +516,7 @@
     "saveTitle": "Save geofence to FC",
     "saveMsg": "Write all fence zones and parameters to the flight controller?",
     "saveConfirm": "Save",
+    "saveFailed": "Saving to the FC failed: {error}",
     "armedLocked": "Fence editing is disabled while armed.",
     "breach": "Geofence breach"
   },
@@ -533,6 +535,7 @@
     "saveTitle": "Save rally points to FC",
     "saveMsg": "Write all rally points and parameters to the flight controller?",
     "saveConfirm": "Save",
+    "saveFailed": "Saving to the FC failed: {error}",
     "armedLocked": "Rally editing is disabled while armed."
   },
   "about": {
