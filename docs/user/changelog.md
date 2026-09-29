@@ -51,6 +51,11 @@ inside the box of the feature release they belong to, so the notes for one relea
       the recording ended in an error ("no such table: flights") and the temp log stayed where it was;
       only Discard worked. Both actions now recover the flight again. Not affected: the "Device
       connection lost" prompt shown while the app is still running.
+    - **A failed geofence, rally or geozone save is now reported.** When writing the fence, the rally
+      points (ArduPilot / PX4) or the geozones (INAV) to the flight controller failed — a link hiccup,
+      a timeout, an item the FC refused — nothing was shown and the Save button simply came back,
+      while what the vehicle actually held might not have matched the panel. The panel now shows the
+      error under the Save button.
     ---
 
     **1.0.1**{ .kite-patch } *2026-09-13*{ .kite-badge }
