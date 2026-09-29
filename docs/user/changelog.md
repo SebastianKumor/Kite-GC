@@ -111,6 +111,20 @@ inside the box of the feature release they belong to, so the notes for one relea
         line of the version you run: 2.0.0 is told about 2.0.1, never about 2.1.0. The default stays
         *Stable releases*. [#162]
 
+    ??? info "INAV over ELRS, mLRS, SiK or Wi-Fi — the full planner on a MAVLink-only link"
+        ELRS and mLRS in MAVLink mode, SiK radios and MAVLink Wi-Fi bridges carry no MSP — and MSP is
+        what an INAV flight controller needs for missions, safe homes and geozones. Until now such a
+        link gave you INAV's MAVLink emulation only: telemetry, but no planner. **INAV 10.0** can carry
+        MSP inside the MAVLink stream, and Kite uses that by itself: connect with the **MAVLink**
+        protocol as you would for ArduPilot, and when the flight controller answers on the tunnel the
+        status shows **MSP/MAV**, UAV Info lists the real INAV version, board and craft name, and
+        mission upload and download (EEPROM and multi-mission included), safe homes, geozones, craft
+        name and flight statistics work as over a direct MSP link. Telemetry stays MAVLink — nothing
+        is polled through the tunnel, so the radio carries no extra load in flight. Needs INAV 10.0 or
+        newer and a MAVLink telemetry port on MAVLink 2 (the default). RC control from Kite and the
+        flight controller's own ADS-B receiver are not on this path yet. Setup and limits:
+        [Connecting → INAV over MAVLink](guides/connecting.md#inav-over-mavlink-mspmav). [#202]
+
     **Added**
 
     - **Android support** — native app with USB serial, Bluetooth LE and Wi-Fi links, touch layout
@@ -243,6 +257,23 @@ inside the box of the feature release they belong to, so the notes for one relea
     - **Frontend errors now reach the support log** — a JavaScript error that used to show only in
       the browser console is written to Kite's backend log file too, so a report from a release build
       carries the full picture. [#193]
+    - **Windows: an Xbox-class gamepad that Windows.Gaming.Input lists but never reads is now read
+      through XInput instead** — the backend log also shows what the game-controller thread sees
+      (which pads it finds, which one streams, the first reading), so a report pins down exactly
+      where a pad drops out. If the sticks feel inverted after this, re-learn the mapping in the RC
+      panel. [#196]
+    - **Android: "Share log file" lets you pick the day** — Kite keeps one diagnostics log per day in
+      app-private storage that no file manager can reach, and the Share button only ever handed out
+      today's file. It now lists the day files, newest first, with date and size (the one this session
+      writes is tagged *current*); tap one to send it to mail or a messenger — so yesterday's log is
+      there after a restart. [#198]
+    - **INAV over a MAVLink-only link gets its full MSP feature set** — INAV 10.0 can carry MSP inside
+      the MAVLink stream, and Kite detects that automatically when you connect with the MAVLink
+      protocol: the status shows **MSP/MAV**, UAV Info shows the real INAV version and craft name, and
+      missions (incl. EEPROM and multi-mission), safe homes, geozones, craft name and flight statistics
+      work as over a direct MSP link — over ELRS/mLRS MAVLink, SiK radios or a Wi-Fi bridge. Telemetry
+      stays MAVLink; nothing is polled through the tunnel. RC control and FC-side ADS-B are not on this
+      path yet. The work also surfaced an INAV firmware bug in long tunnel replies (fixed upstream). [#202]
 
 ??? note "1.0 — Initial release · Live"
 
@@ -254,6 +285,34 @@ inside the box of the feature release they belong to, so the notes for one relea
     Everything this version contains is covered by the regular documentation — start with the
     [quick tour](getting-started/quick-tour.md) or the [GitHub release](https://github.com/b14ckyy/Kite-GC/releases).
 
+    ---
+
+    **1.0.2**{ .kite-patch } *unreleased*{ .kite-badge }
+
+    **Fixed**
+
+    - **ArduPilot / PX4 mission editor: waypoint popup under the side panel.** Selecting a waypoint
+      near the left edge of the map moved it under the mission panel instead of into view, and the
+      map kept shifting while you edited values. The editor now centres the waypoint in the visible
+      map area, the way the INAV tab already did.
+    - **MAVLink (ArduPilot / PX4): losing the connection could leave the app stuck on "connected".**
+      When the link was really gone — a serial cable unplugged, a socket closed — the status bar
+      stayed on "connected" until you clicked Disconnect, and a flight that was being recorded
+      never offered the "Device connection lost" recovery prompt (Discard / Save / Continue on
+      reconnect). Both now work the way they already do on INAV/MSP.
+    - **MAVLink (ArduPilot / PX4): a silent vehicle still showed as a healthy connection.** If the
+      aircraft stopped sending data while the link itself stayed open — a radio dropout, for example —
+      the status bar kept showing a normal connection instead of "Reconnecting…". It now switches to
+      "Reconnecting…" a few seconds after the vehicle goes quiet, and back once data resumes.
+    - **Network (UDP) links on Windows could drop unexpectedly.** If the other side of a UDP
+      connection closed its socket, Windows reported this as a connection error on the next receive
+      and Kite disconnected the whole link, even though the other side might come back on its own.
+      The link now stays up and shows "Reconnecting…" instead.
+    - **Terrain radar and Live AGL: a blank strip along every terrain-tile edge.** The elevation
+      sampler refused the last row and column of each 1° Copernicus tile, so a roughly 30 m wide
+      strip along every full degree of latitude and longitude reported no terrain. In the terrain
+      radar that strip stayed unpainted, which reads as "terrain far below" rather than "unknown";
+      Live AGL and the terrain analysis showed a gap. The sampler now covers the whole tile.
     ---
 
     **1.0.1**{ .kite-patch } *2026-09-13*{ .kite-badge }
@@ -344,3 +403,6 @@ inside the box of the feature release they belong to, so the notes for one relea
 [#189]: https://github.com/b14ckyy/Kite-GC/pull/189
 [#191]: https://github.com/b14ckyy/Kite-GC/pull/191
 [#193]: https://github.com/b14ckyy/Kite-GC/pull/193
+[#196]: https://github.com/b14ckyy/Kite-GC/pull/196
+[#198]: https://github.com/b14ckyy/Kite-GC/pull/198
+[#202]: https://github.com/b14ckyy/Kite-GC/pull/202

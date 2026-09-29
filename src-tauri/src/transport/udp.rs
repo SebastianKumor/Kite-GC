@@ -47,6 +47,9 @@ pub struct UdpTransport {
     /// drop frames not addressed to them, so the fan-out is harmless; peers silent for PEER_TTL age out.
     peers: HashMap<SocketAddr, Instant>,
     socket: UdpSocket,
+    /// The first ICMP "port unreachable" of the session is logged at warn (a tester's log must show why
+    /// nothing arrives); every further one goes to debug so a dead peer doesn't flood the log.
+    peer_unreachable_logged: bool,
 }
 
 /// A learned peer that has been silent this long is dropped from the send fan-out.
@@ -111,7 +114,33 @@ impl UdpTransport {
             peer,
             peers: HashMap::new(),
             socket,
+            peer_unreachable_logged: false,
         })
+    }
+
+    /// True for the errors Windows reports on a UDP socket after an ICMP "port unreachable" came back
+    /// for an earlier datagram — on the next `recv_from` (`WSAECONNRESET`) or `send_to`. UDP is
+    /// connectionless: the peer being gone is a stall (ADR-042), not a transport loss — the link stays
+    /// up, the stall watchdog reports it, and the peer may come back (a restarted SITL or bridge).
+    fn is_peer_unreachable(e: &std::io::Error) -> bool {
+        matches!(
+            e.kind(),
+            std::io::ErrorKind::ConnectionReset
+                | std::io::ErrorKind::ConnectionRefused
+                | std::io::ErrorKind::ConnectionAborted
+        )
+    }
+
+    fn note_peer_unreachable(&mut self, op: &str, peer: SocketAddr, e: &std::io::Error) {
+        if !self.peer_unreachable_logged {
+            self.peer_unreachable_logged = true;
+            log::warn!(
+                "UDP peer {} is not reachable ({} — {}); the link stays open, nothing arrives until the peer is back",
+                peer, op, e
+            );
+        } else {
+            log::debug!("UDP {}: {} — peer still unreachable, ignoring", op, e);
+        }
     }
 }
 
@@ -145,16 +174,9 @@ impl ByteTransport for UdpTransport {
             {
                 Ok(0)
             }
-            // UDP is connectionless: on Windows a datagram we sent to a peer that has since closed its
-            // socket comes back as an ICMP "port unreachable", which the NEXT recv_from reports as
-            // ConnectionReset. With several learned peers (vehicles, another GCS) that happens whenever
-            // one of them goes away — it must not take the whole link down. The peer ages out on its own.
-            Err(ref e)
-                if e.kind() == std::io::ErrorKind::ConnectionReset
-                    || e.kind() == std::io::ErrorKind::ConnectionRefused
-                    || e.kind() == std::io::ErrorKind::ConnectionAborted =>
-            {
-                log::debug!("UDP recv: {} — a peer went away, ignoring", e);
+            Err(ref e) if Self::is_peer_unreachable(e) => {
+                let peer = self.peer;
+                self.note_peer_unreachable("recv", peer, e);
                 Ok(0)
             }
             Err(e) => Err(TransportError::from(e)),
@@ -166,21 +188,31 @@ impl ByteTransport for UdpTransport {
         // target gets it (this is how the first GCS HEARTBEAT wakes a client-mode FC / bridge).
         let now = Instant::now();
         self.peers.retain(|_, seen| now.duration_since(*seen) < PEER_TTL);
-        if self.peers.is_empty() {
-            return self.socket
-                .send_to(data, self.peer)
-                .map(|_| ())
-                .map_err(|e| TransportError::Io(format!("UDP send to {} failed: {}", self.peer, e)));
-        }
+        let targets: Vec<SocketAddr> = if self.peers.is_empty() {
+            vec![self.peer]
+        } else {
+            self.peers.keys().copied().collect()
+        };
+        // A datagram is delivered when at least one target took it. A peer that is gone (ICMP "port
+        // unreachable" surfacing on the send side, see `is_peer_unreachable`) is not a failure: the
+        // datagram is simply lost, like on any quiet link, and the peer ages out on its own. A fatal
+        // `Io` here would make the MSP scheduler tear the link down (`mark_lost`) and the MAVLink
+        // handler warn once per heartbeat / RC frame. Only a real socket error on EVERY target is
+        // reported — with several peers, one dead one must not hide that the others were reached.
+        let mut delivered = 0usize;
         let mut first_err = None;
-        for addr in self.peers.keys() {
-            if let Err(e) = self.socket.send_to(data, addr) {
-                first_err.get_or_insert_with(|| TransportError::Io(format!("UDP send to {} failed: {}", addr, e)));
+        for addr in targets {
+            match self.socket.send_to(data, addr) {
+                Ok(_) => delivered += 1,
+                Err(ref e) if Self::is_peer_unreachable(e) => self.note_peer_unreachable("send", addr, e),
+                Err(e) => {
+                    first_err.get_or_insert_with(|| TransportError::Io(format!("UDP send to {} failed: {}", addr, e)));
+                }
             }
         }
         match first_err {
-            Some(e) if self.peers.len() == 1 => Err(e),
-            _ => Ok(()), // at least one peer took it (a dead peer ages out on its own)
+            Some(e) if delivered == 0 => Err(e),
+            _ => Ok(()),
         }
     }
 

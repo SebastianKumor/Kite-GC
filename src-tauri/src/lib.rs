@@ -38,7 +38,7 @@ mod transport;
 mod user_file;
 mod video;
 
-use commands::connection::{connect, disconnect, set_platform_type, inav_set_craft_name, inav_read_stats, scan_ble_devices, ble_scan_start, ble_scan_stop};
+use commands::connection::{connect, disconnect, set_platform_type, inav_set_craft_name, inav_read_stats, scan_ble_devices, ble_scan_start, ble_scan_stop, debug_tunnel_msp_request, debug_tunnel_stats_snapshot};
 use commands::connection::list_serial_ports;
 use commands::flightlog::{
     flightlog_list, flightlog_get, flightlog_get_track, flightlog_get_battery_records, flightlog_delete,
@@ -100,7 +100,7 @@ use commands::video::{
     video_detached_open, video_detached_close, video_detached_pin_top, video_detached_chrome, video_detached_aspect, video_detached_nudge,
 };
 use video::{MediaMtx, MjpegServer};
-use commands::logging::{set_log_level, get_log_path, log_session_settings, log_frontend};
+use commands::logging::{set_log_level, get_log_path, list_log_files, log_session_settings, log_frontend};
 use commands::tiles::fetch_tile;
 use commands::radar::{radar_configure, radar_set_center, radar_set_node_pos, radar_snapshot};
 use commands::terrain::{
@@ -623,11 +623,14 @@ pub fn run() {
             connect,
             disconnect,
             set_platform_type,
+            debug_tunnel_msp_request,
+            debug_tunnel_stats_snapshot,
             get_app_version,
             is_debug_mode,
             link_status::telemetry_track_since,
             set_log_level,
             get_log_path,
+            list_log_files,
             log_session_settings,
             log_frontend,
             fetch_tile,
