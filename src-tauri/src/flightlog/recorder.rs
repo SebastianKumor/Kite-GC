@@ -120,7 +120,7 @@ pub fn summarize_temp_session(
     let meta = db::read_session_meta(&conn)
         .map_err(|e| format!("Cannot read session_meta: {}", e))?
         .ok_or_else(|| "Temp session has no metadata".to_string())?;
-    let rows = db::get_flight_track(&conn, 0)
+    let rows = db::read_flight_track(&conn, 0, Some(&meta.fc_variant))
         .map_err(|e| format!("Cannot read temp telemetry: {}", e))?;
     if rows.is_empty() {
         return Err("Temp session has no telemetry".into());
@@ -1209,4 +1209,94 @@ fn haversine_m(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
     let c = 2.0 * a.sqrt().asin();
 
     R * c
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn record(timestamp_ms: i64) -> TelemetryRecord {
+        TelemetryRecord {
+            id: 0,
+            flight_id: 0,
+            timestamp_ms,
+            lat: None,
+            lon: None,
+            alt_m: None,
+            speed_ms: None,
+            airspeed_ms: None,
+            throttle_pct: None,
+            heading: None,
+            vario_ms: None,
+            voltage: None,
+            current_a: None,
+            mah_drawn: None,
+            rssi: None,
+            battery_percentage: None,
+            roll: None,
+            pitch: None,
+            yaw: None,
+            fix_type: None,
+            num_sat: None,
+            cpu_load: None,
+            link_quality: None,
+            baro_alt_m: None,
+            gps_hdop: None,
+            gps_eph: None,
+            gps_epv: None,
+            active_wp_number: None,
+            // Raw INAV flags without a canonical mode, so the read path derives the mode.
+            active_flight_mode_flags: Some(1),
+            state_flags: None,
+            nav_state: None,
+            nav_flags: None,
+            rx_signal_received: None,
+            hw_health_status: None,
+            baro_temperature: None,
+            wind_n_ms: None,
+            wind_e_ms: None,
+            wind_d_ms: None,
+            rc_data_json: None,
+            rc_command_json: None,
+            nav_lat: None,
+            nav_lon: None,
+            nav_alt_m: None,
+            mode_primary: None,
+            mode_modifiers: None,
+            link_snr: None,
+            link_rssi_dbm: None,
+        }
+    }
+
+    /// Crash recovery reads an orphan `.ktmp`, which has no `flights` table: summarizing it must
+    /// take the flight variant from `session_meta` instead of querying `flights`.
+    #[test]
+    fn summarize_temp_session_reads_a_ktmp_without_flights_table() {
+        let temp_path = std::env::temp_dir()
+            .join(format!("kite-recorder-test-recover-{}.ktmp", std::process::id()));
+        db::remove_temp_session(&temp_path);
+        {
+            let conn = db::open_temp_session(&temp_path).unwrap();
+            db::write_session_meta(
+                &conn, &Utc::now(), "TestCraft", "INAV", "8.0.0", "TEST", 1, None, "MSP", None, None,
+            )
+            .unwrap();
+            db::insert_telemetry_batch(&conn, &[record(0), record(100)]).unwrap();
+        }
+
+        let result = summarize_temp_session(temp_path.clone(), PathBuf::from("unused.db"));
+        let derived = db::open_temp_session(&temp_path)
+            .and_then(|conn| db::read_flight_track(&conn, 0, Some("INAV")));
+        db::remove_temp_session(&temp_path);
+
+        let (session, count) = result.expect("recovery must read the .ktmp");
+        assert_eq!(count, 2);
+        assert_eq!(session.flight.fc_variant, "INAV");
+        let expected = crate::flightmode::classify_inav(1).primary;
+        let derived = derived.unwrap();
+        assert_eq!(derived.len(), 2);
+        for r in derived {
+            assert_eq!(r.mode_primary.as_deref(), Some(expected.as_str()));
+        }
+    }
 }
