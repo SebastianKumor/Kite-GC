@@ -182,6 +182,7 @@
       "comRcInModeOk": "COM_RC_IN_MODE = {value}: Joystick-Eingabe erlaubt. Die Sticks wirken in manuellen Modi (Position / Altitude / Stabilized), nicht in Hold, Takeoff oder Mission.",
       "comRcInModeRead": "Neu lesen",
       "comRcInModeFix": "Joystick erlauben (auf 2 setzen)",
+      "comRcInModeSetFailed": "COM_RC_IN_MODE konnte nicht gesetzt werden: {error}",
       "sticks": "Sticks",
       "roll": "Roll",
       "pitch": "Pitch",

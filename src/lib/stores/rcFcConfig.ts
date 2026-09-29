@@ -46,12 +46,17 @@ export async function loadRcFcConfig(): Promise<void> {
 
 /** Live COM_RC_IN_MODE of the connected PX4 vehicle; null while unknown / not PX4. */
 export const px4RcInMode = writable<number | null>(null);
+/** Error of the last "Allow joystick" write (shown in the RC panel); null when none / cleared. */
+export const px4RcInModeError = writable<string | null>(null);
 
 /** Read COM_RC_IN_MODE from the FC (PX4 only, best-effort). */
 export async function loadPx4RcInMode(): Promise<void> {
   try {
     const v = await invoke<number | null>('mav_read_param', { name: 'COM_RC_IN_MODE' });
-    if (v != null) px4RcInMode.set(Math.round(v));
+    if (v != null) {
+      px4RcInMode.set(Math.round(v));
+      px4RcInModeError.set(null); // a fresh value supersedes a stale "could not set" line
+    }
   } catch (e) {
     console.warn('[rc] COM_RC_IN_MODE read failed', e);
     px4RcInMode.set(null);
@@ -60,10 +65,14 @@ export async function loadPx4RcInMode(): Promise<void> {
 
 /** Set COM_RC_IN_MODE = 2 ("RC and Joystick with fallback"), then re-read. PX4 persists parameters itself. */
 export async function allowPx4JoystickInput(): Promise<void> {
+  px4RcInModeError.set(null);
   try {
     await invoke('mav_set_param', { name: 'COM_RC_IN_MODE', value: 2 });
     await loadPx4RcInMode();
-  } catch (e) { console.warn('[rc] COM_RC_IN_MODE set failed', e); }
+  } catch (e) {
+    console.warn('[rc] COM_RC_IN_MODE set failed', e);
+    px4RcInModeError.set(String(e));
+  }
 }
 
 /** Set the FC's msp_override_channels bitmask at runtime (not saved), then re-read. */

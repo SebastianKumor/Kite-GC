@@ -14,7 +14,7 @@ import { loadSafehomeConfig, clearSafehome } from '$lib/stores/safehome';
 import { loadGeozoneConfig, clearGeozones } from '$lib/stores/geozone';
 import { loadFenceConfig, clearFence } from '$lib/stores/fence';
 import { loadRallyConfig, clearRally } from '$lib/stores/rally';
-import { loadPx4RcInMode, px4RcInMode } from '$lib/stores/rcFcConfig';
+import { loadPx4RcInMode, px4RcInMode, px4RcInModeError } from '$lib/stores/rcFcConfig';
 import { rcPlatform } from '$lib/stores/rcPlatform';
 
 /** Session-only memory of the platform-type override, keyed by the FC hardware id (MSP / MAVLink).
@@ -251,6 +251,7 @@ export async function disconnectFC(baudRate: number): Promise<void> {
   clearFence();
   clearRally();
   px4RcInMode.set(null);
+  px4RcInModeError.set(null);
   stopTelemetryListeners();
   resetTelemetry();
   connectionProtocol.set({ primary: '', secondary: null });
