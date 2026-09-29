@@ -3,7 +3,7 @@
 
 // Runtime MAVLink parameter reads (geofence params: ArduPilot FENCE_* / PX4 GF_*). Mirrors the mission
 // microprotocol's request/receiver pattern via `RegisterParamReceiver`. Writes reuse
-// `control::set_param` (fire-and-forget PARAM_SET). See docs/active/GEOFENCE.md.
+// `control::set_param` (PARAM_SET; on PX4 preceded by a typed read). See docs/active/GEOFENCE.md.
 
 use std::collections::HashMap;
 use std::sync::mpsc;

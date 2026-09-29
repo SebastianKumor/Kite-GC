@@ -220,7 +220,9 @@
     deleteFenceZone(i);
     expandedFence = null;
   }
-  function onRevertFence() { revertFenceWorking(); expandedFence = null; }
+  /** Outcome of the last fence save: a failed upload, or parameters the FC did not take. */
+  let fenceSaveIssue = $state<{ kind: 'failed' | 'params'; detail: string } | null>(null);
+  function onRevertFence() { revertFenceWorking(); expandedFence = null; fenceSaveIssue = null; }
   async function onSaveFence() {
     if (fenceBusy) return;
     const ans = await confirmDialog.show({
@@ -230,7 +232,15 @@
     });
     if (ans !== 'ok') return;
     fenceBusy = true;
-    try { await saveFenceConfig(); } finally { fenceBusy = false; }
+    fenceSaveIssue = null;
+    try {
+      const notWritten = await saveFenceConfig();
+      if (notWritten.length > 0) fenceSaveIssue = { kind: 'params', detail: notWritten.join('; ') };
+    } catch (e) {
+      fenceSaveIssue = { kind: 'failed', detail: String(e) };
+    } finally {
+      fenceBusy = false;
+    }
   }
 
   /** Representative point of a fence zone (circle centre / polygon centroid) for focus-on-click. */
@@ -345,7 +355,9 @@
     if (i != null) { expandedRally = i; rallyEditing.set(true); }
   }
   function onDeleteRally(i: number) { deleteRallyPoint(i); expandedRally = null; }
-  function onRevertRally() { revertRallyWorking(); expandedRally = null; }
+  /** Outcome of the last rally save: a failed upload, or parameters the FC did not take. */
+  let rallySaveIssue = $state<{ kind: 'failed' | 'params'; detail: string } | null>(null);
+  function onRevertRally() { revertRallyWorking(); expandedRally = null; rallySaveIssue = null; }
   async function onSaveRally() {
     if (rallyBusy) return;
     const ans = await confirmDialog.show({
@@ -355,7 +367,15 @@
     });
     if (ans !== 'ok') return;
     rallyBusy = true;
-    try { await saveRallyConfig(); } finally { rallyBusy = false; }
+    rallySaveIssue = null;
+    try {
+      const notWritten = await saveRallyConfig();
+      if (notWritten.length > 0) rallySaveIssue = { kind: 'params', detail: notWritten.join('; ') };
+    } catch (e) {
+      rallySaveIssue = { kind: 'failed', detail: String(e) };
+    } finally {
+      rallyBusy = false;
+    }
   }
   function rallyCenter(p: RallyPoint): { lat: number; lon: number } { return { lat: p.lat / 1e7, lon: p.lon / 1e7 }; }
 
@@ -678,6 +698,11 @@
             <Button variant="standard" disabled={fenceBusy} onclick={onRevertFence}>{$t('geozone.revert')}</Button>
           </div>
         {/if}
+        {#if fenceSaveIssue?.kind === 'failed'}
+          <div class="gz-issues"><div class="gz-issue gz-err">{$t('fence.saveFailed', { values: { error: fenceSaveIssue.detail } })}</div></div>
+        {:else if fenceSaveIssue?.kind === 'params'}
+          <div class="gz-issues"><div class="gz-issue">{$t('fence.paramsNotWritten', { values: { params: fenceSaveIssue.detail } })}</div></div>
+        {/if}
       </div>
     {/if}
 
@@ -764,6 +789,11 @@
             </Button>
             <Button variant="standard" disabled={rallyBusy} onclick={onRevertRally}>{$t('geozone.revert')}</Button>
           </div>
+        {/if}
+        {#if rallySaveIssue?.kind === 'failed'}
+          <div class="gz-issues"><div class="gz-issue gz-err">{$t('rally.saveFailed', { values: { error: rallySaveIssue.detail } })}</div></div>
+        {:else if rallySaveIssue?.kind === 'params'}
+          <div class="gz-issues"><div class="gz-issue">{$t('rally.paramsNotWritten', { values: { params: rallySaveIssue.detail } })}</div></div>
         {/if}
       </div>
     {/if}

@@ -537,6 +537,8 @@
     "saveTitle": "Save geofence to FC",
     "saveMsg": "Write all fence zones and parameters to the flight controller?",
     "saveConfirm": "Save",
+    "saveFailed": "Saving to the FC failed: {error}",
+    "paramsNotWritten": "Fence saved, but these parameters were not written: {params}",
     "armedLocked": "Fence editing is disabled while armed.",
     "breach": "Geofence breach"
   },
@@ -555,6 +557,8 @@
     "saveTitle": "Save rally points to FC",
     "saveMsg": "Write all rally points and parameters to the flight controller?",
     "saveConfirm": "Save",
+    "saveFailed": "Saving to the FC failed: {error}",
+    "paramsNotWritten": "Rally points saved, but these parameters were not written: {params}",
     "armedLocked": "Rally editing is disabled while armed."
   },
   "about": {

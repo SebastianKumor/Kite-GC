@@ -76,8 +76,11 @@ pub fn rally_read_all(state: State<'_, AppState>) -> Result<RallyConfig, String>
 }
 
 /// "Save to FC": upload the rally points (or clear them when empty), then write the provided params.
+/// Returns the parameters that could NOT be written (`NAME: reason`), as a warning for the panel: once
+/// the points went up, a slow or unknown parameter must not fail the save — on PX4 `set_param` reads
+/// the parameter's type first and errors on a timeout, and the points would already be on the vehicle.
 #[tauri::command(async)]
-pub fn rally_write_all(config: RallyConfig, state: State<'_, AppState>) -> Result<(), String> {
+pub fn rally_write_all(config: RallyConfig, state: State<'_, AppState>) -> Result<Vec<String>, String> {
     let Some((cmd_tx, fc_sysid, px4)) = mav_handle(&state)? else {
         return Err("FC is not running MAVLink".into());
     };
@@ -87,11 +90,15 @@ pub fn rally_write_all(config: RallyConfig, state: State<'_, AppState>) -> Resul
     } else {
         mavlink_proto::mission::upload(&cmd_tx, fc_sysid, &items, false, MavMissionType::MAV_MISSION_TYPE_RALLY, false, |_, _| {})?;
     }
+    let mut warnings = Vec::new();
     for p in &config.params {
-        control::set_param(&cmd_tx, fc_sysid, &p.name, p.value, px4)?;
+        if let Err(e) = control::set_param(&cmd_tx, fc_sysid, &p.name, p.value, px4) {
+            log::warn!("[RALLY] parameter {} not written: {}", p.name, e);
+            warnings.push(format!("{}: {}", p.name, e));
+        }
     }
-    eprintln!("[RALLY] saved {} point(s) + {} params to FC", config.points.len(), config.params.len());
-    Ok(())
+    eprintln!("[RALLY] saved {} point(s) + {} params to FC ({} not written)", config.points.len(), config.params.len(), warnings.len());
+    Ok(warnings)
 }
 
 /// Each rally MISSION item is one point (`MAV_CMD_NAV_RALLY_POINT`, x/y = lat/lon, z = alt m).

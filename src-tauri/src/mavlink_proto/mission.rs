@@ -455,10 +455,10 @@ fn wp_to_item(wp: &ArduWaypoint, seq: u16, target: u8, mission_type: MavMissionT
 // of a hand-maintained whitelist. This preserves any command the FC sends — including ones Kite has
 // no dedicated editor for yet — on download→upload, instead of silently rewriting them to a plain
 // waypoint. Truly-unknown values (not in the dialect) fall back to a safe default.
-/// Position items whose param4 is a yaw angle: WAYPOINT, LOITER_UNLIM/TURNS/TIME, LAND, TAKEOFF,
-/// SPLINE_WAYPOINT, VTOL_TAKEOFF/LAND.
+/// Position items whose param4 is a yaw angle: WAYPOINT, LOITER_UNLIM, LAND, TAKEOFF, VTOL_TAKEOFF/LAND.
+/// Not LOITER_TURNS/TIME (param4 = xtrack location) and not SPLINE_WAYPOINT (param4 unused).
 fn cmd_yaw_in_param4(cmd: u16) -> bool {
-    matches!(cmd, 16 | 17 | 18 | 19 | 21 | 22 | 82 | 84 | 85)
+    matches!(cmd, 16 | 17 | 21 | 22 | 84 | 85)
 }
 
 fn u8_to_frame(v: u8) -> MavFrame {
