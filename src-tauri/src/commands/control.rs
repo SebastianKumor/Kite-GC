@@ -237,7 +237,9 @@ pub fn mav_vtol_transition(to_fw: bool, state: State<'_, AppState>) -> Result<()
     )
 }
 
-/// Set a single FC parameter (e.g. the fixed-wing loiter radius `WP_LOITER_RAD`). Fire-and-forget.
+/// Set a single FC parameter (e.g. the fixed-wing loiter radius `WP_LOITER_RAD`). On PX4 the parameter's
+/// type is read first and an unknown or silent parameter is an `Err`; no wait for the PARAM_VALUE echo
+/// (see `control::set_param`).
 #[tauri::command(async)]
 pub fn mav_set_param(name: String, value: f32, state: State<'_, AppState>) -> Result<(), String> {
     // PX4 needs the parameter's declared type on PARAM_SET (see control::set_param).
@@ -254,7 +256,8 @@ pub fn mav_set_param(name: String, value: f32, state: State<'_, AppState>) -> Re
 
 
 /// Read a single FC parameter by name (best-effort; `None` when the FC doesn't report it within the
-/// params_rt timeout). Used for the Guided loiter-radius ring (`WP_LOITER_RAD` / `NAV_LOITER_RAD`).
+/// params_rt timeout). Used for the Guided loiter-radius ring (`WP_LOITER_RAD` / `NAV_LOITER_RAD`) and
+/// the RC panel's PX4 `COM_RC_IN_MODE` read.
 #[tauri::command(async)]
 pub fn mav_read_param(name: String, state: State<'_, AppState>) -> Result<Option<f32>, String> {
     let (cmd_tx, fc_sysid) = mav_handle(&state)?;

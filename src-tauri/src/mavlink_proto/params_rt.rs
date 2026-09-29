@@ -4,6 +4,8 @@
 // Runtime MAVLink parameter reads (geofence params: ArduPilot FENCE_* / PX4 GF_*). Mirrors the mission
 // microprotocol's request/receiver pattern via `RegisterParamReceiver`. Writes reuse
 // `control::set_param` (PARAM_SET; on PX4 preceded by a typed read). See docs/active/GEOFENCE.md.
+// The handler has ONE param-receiver slot, so `read_params_typed` holds `PARAM_SLOT` for its whole
+// register -> read -> unregister cycle: overlapping readers wait instead of displacing each other.
 
 use std::collections::HashMap;
 use std::sync::mpsc;
@@ -14,6 +16,9 @@ use ::mavlink::ardupilotmega::{MavMessage, MavParamType, PARAM_REQUEST_READ_DATA
 use super::handler::MavlinkCommand;
 
 const PARAM_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Serialises use of the handler's single param-receiver slot (see the header comment).
+static PARAM_SLOT: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn pack_param_id(name: &str) -> [u8; 16] {
     let mut id = [0u8; 16];
@@ -94,6 +99,9 @@ pub fn read_params_typed(
     fc_sysid: u8,
     names: &[&str],
 ) -> HashMap<String, (f32, MavParamType)> {
+    // Held until after the Unregister below: a second Register would replace our sender, and our
+    // unconditional Unregister would then clear the other reader's slot.
+    let _slot = PARAM_SLOT.lock().unwrap_or_else(|p| p.into_inner());
     let (tx, rx) = mpsc::channel();
     if cmd_tx.send(MavlinkCommand::RegisterParamReceiver(tx)).is_err() {
         return HashMap::new();

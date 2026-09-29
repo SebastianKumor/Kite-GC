@@ -40,8 +40,9 @@ export async function loadRcFcConfig(): Promise<void> {
 // ── PX4: COM_RC_IN_MODE ───────────────────────────────────────────────────────────────────────
 // PX4 ignores MANUAL_CONTROL unless COM_RC_IN_MODE allows a MAVLink/joystick source (0 = RC only and
 // 4 = sticks disabled block it). Read ONCE in the on-connect sequence (connectionController), after the
-// fence/rally downloads: the MAVLink handler has a single param-receiver slot, so a read started from a
-// component effect in parallel with those downloads starves one of the two for the 3 s param timeout.
+// fence/rally downloads: the MAVLink handler has a single param-receiver slot, and a second reader used to
+// displace the first one, which then failed at once (its unconditional unregister also cleared the newer
+// reader's slot). `params_rt` now serialises the slot, so overlapping reads wait for each other instead.
 
 /** Live COM_RC_IN_MODE of the connected PX4 vehicle; null while unknown / not PX4. */
 export const px4RcInMode = writable<number | null>(null);
@@ -50,7 +51,7 @@ export const px4RcInMode = writable<number | null>(null);
 export async function loadPx4RcInMode(): Promise<void> {
   try {
     const v = await invoke<number | null>('mav_read_param', { name: 'COM_RC_IN_MODE' });
-    px4RcInMode.set(v == null ? null : Math.round(v));
+    if (v != null) px4RcInMode.set(Math.round(v));
   } catch (e) {
     console.warn('[rc] COM_RC_IN_MODE read failed', e);
     px4RcInMode.set(null);

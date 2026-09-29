@@ -100,9 +100,10 @@ pub fn send_command_int(
 
 /// Set a single FC parameter. Used for tunables that have no dedicated command — e.g. the fixed-wing
 /// loiter radius (`WP_LOITER_RAD`). ArduPilot ignores `param_type` for its REAL32 params, so there the
-/// `PARAM_SET` goes out fire-and-forget; on PX4 the parameter's declared type is READ first (a typed
-/// `PARAM_REQUEST_READ`, up to `params_rt::PARAM_TIMEOUT`) and an unknown or silent parameter is an
-/// `Err`. Neither path waits for the PARAM_VALUE echo of the write (non-critical, keeps it simple).
+/// `PARAM_SET` goes out fire-and-forget; on PX4 the parameter is READ first (`PARAM_REQUEST_READ`, the
+/// reply carries the declared type; up to `params_rt::PARAM_TIMEOUT`) and an unknown or silent
+/// parameter is an `Err`. Neither path waits for the PARAM_VALUE echo of the write (non-critical, keeps
+/// it simple).
 pub fn set_param(
     cmd_tx: &mpsc::Sender<MavlinkCommand>,
     fc_sysid: u8,

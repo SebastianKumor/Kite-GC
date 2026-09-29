@@ -220,7 +220,7 @@
     deleteFenceZone(i);
     expandedFence = null;
   }
-  /** Outcome of the last fence save: a failed upload, or parameters the FC did not take. */
+  /** Outcome of the last fence save: a failed upload, or parameters Kite could not write. */
   let fenceSaveIssue = $state<{ kind: 'failed' | 'params'; detail: string } | null>(null);
   function onRevertFence() { revertFenceWorking(); expandedFence = null; fenceSaveIssue = null; }
   async function onSaveFence() {
@@ -355,7 +355,7 @@
     if (i != null) { expandedRally = i; rallyEditing.set(true); }
   }
   function onDeleteRally(i: number) { deleteRallyPoint(i); expandedRally = null; }
-  /** Outcome of the last rally save: a failed upload, or parameters the FC did not take. */
+  /** Outcome of the last rally save: a failed upload, or parameters Kite could not write. */
   let rallySaveIssue = $state<{ kind: 'failed' | 'params'; detail: string } | null>(null);
   function onRevertRally() { revertRallyWorking(); expandedRally = null; rallySaveIssue = null; }
   async function onSaveRally() {

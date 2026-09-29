@@ -71,7 +71,7 @@ export async function loadFenceConfig(): Promise<void> {
 }
 
 /** "Save to FC": upload the working copy (geometry + params), then re-read so loaded == FC truth.
- *  Resolves with the parameters the FC did not take (`NAME: reason`, empty when all went through) —
+ *  Resolves with the parameters Kite could not write (`NAME: reason`, empty when all went through) —
  *  the geometry is on the vehicle by then, so a parameter failure is a warning, not a failed save. */
 export async function saveFenceConfig(): Promise<string[]> {
   const cfg = get(fenceWorking);
