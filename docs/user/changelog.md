@@ -274,6 +274,13 @@ inside the box of the feature release they belong to, so the notes for one relea
       work as over a direct MSP link — over ELRS/mLRS MAVLink, SiK radios or a Wi-Fi bridge. Telemetry
       stays MAVLink; nothing is polled through the tunnel. RC control and FC-side ADS-B are not on this
       path yet. The work also surfaced an INAV firmware bug in long tunnel replies (fixed upstream). [#202]
+    - **PX4: take-off and land no longer head for 0°N 0°E, missions with unset yaw or action items
+      upload, integer parameters read and write correctly, and the RC panel shows COM_RC_IN_MODE with a
+      one-click fix when it blocks joystick input.** A geofence or rally save whose parameters the
+      vehicle does not take now reports those parameters as a warning instead of failing after the
+      geometry is already on the vehicle. For ArduPilot too: mission, fence and rally transfers address
+      the autopilot component, so they pass through a routing relay such as Mission Planner's MAVLink
+      mirror. Contributed by dldnjsxo95. [#195] · [#205]
 
 ??? note "1.0 — Initial release · Live"
 
