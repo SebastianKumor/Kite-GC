@@ -44,7 +44,7 @@
   } from '$lib/stores/rcProfiles';
   import { connection, isArduPilotLink } from '$lib/stores/connection';
   import { telemetry } from '$lib/stores/telemetry';
-  import { loadRcFcConfig, rcFcConfig, setOverrideBitmask, px4RcInMode, loadPx4RcInMode, allowPx4JoystickInput } from '$lib/stores/rcFcConfig';
+  import { loadRcFcConfig, rcFcConfig, setOverrideBitmask, px4RcInMode, px4RcInModeError, loadPx4RcInMode, allowPx4JoystickInput } from '$lib/stores/rcFcConfig';
   import { rcEngaged, engage, disengage } from '$lib/stores/rcEngage';
   import { syncFromFc } from '$lib/stores/rcMirror';
   import { rcManual, defaultManualMap } from '$lib/stores/rcManual';
@@ -491,6 +491,9 @@
                 <Button size="sm" variant="data" onclick={() => void allowPx4JoystickInput()}>{$t('rc.manual.comRcInModeFix')}</Button>
               {/if}
             </div>
+            {#if $px4RcInModeError}
+              <div class="rc-banner-hint rc-banner-error">{$t('rc.manual.comRcInModeSetFailed', { values: { error: $px4RcInModeError } })}</div>
+            {/if}
           </div>
         {/if}
         <div class="rc-rate">
@@ -646,6 +649,7 @@
   .rc-banner-title { font-weight: 700; font-size: 11px; margin-bottom: 3px; }
   .rc-banner-list { font-variant-numeric: tabular-nums; margin-bottom: 3px; }
   .rc-banner-hint { color: #d8d8d8; line-height: 1.4; }
+  .rc-banner-error { color: #d40000; margin-top: 6px; }
   .rc-banner-block {
     background: rgba(212, 0, 0, 0.16); border: 1px solid rgba(212, 0, 0, 0.5); color: #ff9a9a;
   }
