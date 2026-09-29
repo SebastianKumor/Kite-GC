@@ -158,7 +158,9 @@
     deleteGeozone(id);
     if (expandedZone === id) expandedZone = null;
   }
-  function onRevert() { revertGeozoneWorking(); expandedZone = null; }
+  /** Error of the last geozone save, shown under the Save row (a rejected write used to vanish). */
+  let geozoneSaveError = $state<string | null>(null);
+  function onRevert() { revertGeozoneWorking(); expandedZone = null; geozoneSaveError = null; }
   async function onSave() {
     if (busy || hasErrors || armed) return;
     const ans = await confirmDialog.show({
@@ -168,9 +170,12 @@
     });
     if (ans !== 'ok') return;
     busy = true;
+    geozoneSaveError = null;
     try {
       geozoneWorking.update((c) => (c ? ensureCCWConfig(c) : c)); // CCW-normalise polygons before write
       await saveGeozoneConfig();
+    } catch (e) {
+      geozoneSaveError = String(e);
     } finally {
       busy = false;
     }
@@ -200,6 +205,7 @@
   // flight you never regain control. So fence editing stays available armed (unlike INAV geozones,
   // which apply via reboot and thus can't change in flight anyway).
   let fenceBusy = $state(false);
+  let fenceSaveError = $state<string | null>(null);
   let editFenceRadiusM = $state(0);
   $effect(() => {
     const z = fenceZones[expandedFence ?? -1];
@@ -215,7 +221,7 @@
     deleteFenceZone(i);
     expandedFence = null;
   }
-  function onRevertFence() { revertFenceWorking(); expandedFence = null; }
+  function onRevertFence() { revertFenceWorking(); expandedFence = null; fenceSaveError = null; }
   async function onSaveFence() {
     if (fenceBusy) return;
     const ans = await confirmDialog.show({
@@ -225,7 +231,8 @@
     });
     if (ans !== 'ok') return;
     fenceBusy = true;
-    try { await saveFenceConfig(); } finally { fenceBusy = false; }
+    fenceSaveError = null;
+    try { await saveFenceConfig(); } catch (e) { fenceSaveError = String(e); } finally { fenceBusy = false; }
   }
 
   /** Representative point of a fence zone (circle centre / polygon centroid) for focus-on-click. */
@@ -328,6 +335,7 @@
   // fence (a stuck loiter must be editable in the air). See the note on fenceBusy above.
 
   let rallyBusy = $state(false);
+  let rallySaveError = $state<string | null>(null);
   let editRallyAltM = $state(0);
   $effect(() => {
     const p = rallyPoints[expandedRally ?? -1];
@@ -340,7 +348,7 @@
     if (i != null) { expandedRally = i; rallyEditing.set(true); }
   }
   function onDeleteRally(i: number) { deleteRallyPoint(i); expandedRally = null; }
-  function onRevertRally() { revertRallyWorking(); expandedRally = null; }
+  function onRevertRally() { revertRallyWorking(); expandedRally = null; rallySaveError = null; }
   async function onSaveRally() {
     if (rallyBusy) return;
     const ans = await confirmDialog.show({
@@ -350,7 +358,8 @@
     });
     if (ans !== 'ok') return;
     rallyBusy = true;
-    try { await saveRallyConfig(); } finally { rallyBusy = false; }
+    rallySaveError = null;
+    try { await saveRallyConfig(); } catch (e) { rallySaveError = String(e); } finally { rallyBusy = false; }
   }
   function rallyCenter(p: RallyPoint): { lat: number; lon: number } { return { lat: p.lat / 1e7, lon: p.lon / 1e7 }; }
 
@@ -557,6 +566,9 @@
             <Button variant="standard" disabled={busy} onclick={onRevert}>{$t('geozone.revert')}</Button>
           </div>
         {/if}
+        {#if geozoneSaveError}
+          <div class="gz-issues"><div class="gz-issue gz-err">{$t('geozone.saveFailed', { values: { error: geozoneSaveError } })}</div></div>
+        {/if}
       </div>
     {/if}
 
@@ -668,6 +680,9 @@
             <Button variant="standard" disabled={fenceBusy} onclick={onRevertFence}>{$t('geozone.revert')}</Button>
           </div>
         {/if}
+        {#if fenceSaveError}
+          <div class="gz-issues"><div class="gz-issue gz-err">{$t('fence.saveFailed', { values: { error: fenceSaveError } })}</div></div>
+        {/if}
       </div>
     {/if}
 
@@ -754,6 +769,9 @@
             </Button>
             <Button variant="standard" disabled={rallyBusy} onclick={onRevertRally}>{$t('geozone.revert')}</Button>
           </div>
+        {/if}
+        {#if rallySaveError}
+          <div class="gz-issues"><div class="gz-issue gz-err">{$t('rally.saveFailed', { values: { error: rallySaveError } })}</div></div>
         {/if}
       </div>
     {/if}
