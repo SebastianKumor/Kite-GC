@@ -14,6 +14,8 @@ import { loadSafehomeConfig, clearSafehome } from '$lib/stores/safehome';
 import { loadGeozoneConfig, clearGeozones } from '$lib/stores/geozone';
 import { loadFenceConfig, clearFence } from '$lib/stores/fence';
 import { loadRallyConfig, clearRally } from '$lib/stores/rally';
+import { loadPx4RcInMode, px4RcInMode } from '$lib/stores/rcFcConfig';
+import { rcPlatform } from '$lib/stores/rcPlatform';
 
 /** Session-only memory of the platform-type override, keyed by the FC hardware id (MSP / MAVLink).
  *  RAM only by design: a Kite restart forgets it; passive telemetry has no id and never lands here. */
@@ -226,8 +228,15 @@ export async function connectFC(params: ConnectParams): Promise<FcInfo> {
   // ArduPilot/PX4 geofence + rally points over MAVLink (MAV_MISSION_TYPE_FENCE/RALLY). Both ride the
   // mission microprotocol (strict request→response) — run them SEQUENTIALLY so the two downloads don't
   // collide. See docs/active/GEOFENCE.md. Not on an MSP-over-MAVLink link: that FC is INAV (geozones).
+  // PX4's COM_RC_IN_MODE (RC panel banner) rides the same single param-receiver slot, so it comes last
+  // in the sequence instead of racing the downloads from a component effect.
   if (get(isArduPilotLink)) {
-    void (async () => { await loadFenceConfig(); await loadRallyConfig(); })();
+    const px4 = get(rcPlatform) === 'px4';
+    void (async () => {
+      await loadFenceConfig();
+      await loadRallyConfig();
+      if (px4) await loadPx4RcInMode();
+    })();
   }
   return info;
 }
@@ -241,6 +250,7 @@ export async function disconnectFC(baudRate: number): Promise<void> {
   clearGeozones();
   clearFence();
   clearRally();
+  px4RcInMode.set(null);
   stopTelemetryListeners();
   resetTelemetry();
   connectionProtocol.set({ primary: '', secondary: null });
