@@ -55,12 +55,15 @@ export async function loadRallyConfig(): Promise<void> {
   }
 }
 
-/** "Save to FC": upload the working copy (points + params), then re-read so loaded == FC truth. */
-export async function saveRallyConfig(): Promise<void> {
+/** "Save to FC": upload the working copy (points + params), then re-read so loaded == FC truth.
+ *  Resolves with the parameters Kite could not write (`NAME: reason`, empty when all went through) —
+ *  the points are on the vehicle by then, so a parameter failure is a warning, not a failed save. */
+export async function saveRallyConfig(): Promise<string[]> {
   const cfg = get(rallyWorking);
-  if (!cfg) return;
-  await invoke('rally_write_all', { config: cfg });
+  if (!cfg) return [];
+  const warnings = await invoke<string[]>('rally_write_all', { config: cfg });
   await loadRallyConfig();
+  return warnings;
 }
 
 export function revertRallyWorking(): void {

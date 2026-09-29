@@ -44,7 +44,7 @@
   } from '$lib/stores/rcProfiles';
   import { connection, isArduPilotLink } from '$lib/stores/connection';
   import { telemetry } from '$lib/stores/telemetry';
-  import { loadRcFcConfig, rcFcConfig, setOverrideBitmask } from '$lib/stores/rcFcConfig';
+  import { loadRcFcConfig, rcFcConfig, setOverrideBitmask, px4RcInMode, loadPx4RcInMode, allowPx4JoystickInput } from '$lib/stores/rcFcConfig';
   import { rcEngaged, engage, disengage } from '$lib/stores/rcEngage';
   import { syncFromFc } from '$lib/stores/rcMirror';
   import { rcManual, defaultManualMap } from '$lib/stores/rcManual';
@@ -295,6 +295,11 @@
     rawTakingOver = on;
   });
 
+  // ── PX4: COM_RC_IN_MODE (0 = RC only / 4 = sticks disabled block MANUAL_CONTROL) ────────────────
+  // Read by the on-connect sequence (connectionController → rcFcConfig.loadPx4RcInMode), not here: a
+  // read from an effect raced the fence/rally downloads for the handler's single param-receiver slot.
+  const rcInModeBlocks = $derived($px4RcInMode === 0 || $px4RcInMode === 4);
+
   // Long-press to engage/disengage (HoldToConfirm fills the button left→right over this duration, then
   // fires toggleEngage). Never auto-engages on connect/plug (anti-accidental).
   const LONG_PRESS_MS = 600;
@@ -467,9 +472,25 @@
           </div>
         {/if}
         {#if connectedPx4}
-          <!-- PX4 ignores MANUAL_CONTROL unless COM_RC_IN_MODE allows a MAVLink/joystick source. -->
-          <div class="rc-banner rc-banner-info">
-            <div class="rc-banner-hint">{$t('rc.manual.comRcInModeHint')}</div>
+          <!-- PX4 ignores MANUAL_CONTROL unless COM_RC_IN_MODE allows a MAVLink/joystick source. Read the
+               live value so the operator sees the actual blocker, with a one-click fix (2 = RC and
+               joystick with fallback — the QGC default). -->
+          <div class="rc-banner {rcInModeBlocks ? 'rc-banner-warn' : 'rc-banner-info'}">
+            <div class="rc-banner-hint">
+              {#if $px4RcInMode == null}
+                {$t('rc.manual.comRcInModeHint')}
+              {:else if rcInModeBlocks}
+                {$t('rc.manual.comRcInModeBlocked', { values: { value: $px4RcInMode } })}
+              {:else}
+                {$t('rc.manual.comRcInModeOk', { values: { value: $px4RcInMode } })}
+              {/if}
+            </div>
+            <div class="rc-banner-actions">
+              <Button size="sm" onclick={() => void loadPx4RcInMode()}>{$t('rc.manual.comRcInModeRead')}</Button>
+              {#if rcInModeBlocks}
+                <Button size="sm" variant="data" onclick={() => void allowPx4JoystickInput()}>{$t('rc.manual.comRcInModeFix')}</Button>
+              {/if}
+            </div>
           </div>
         {/if}
         <div class="rc-rate">
@@ -627,6 +648,12 @@
   .rc-banner-hint { color: #d8d8d8; line-height: 1.4; }
   .rc-banner-block {
     background: rgba(212, 0, 0, 0.16); border: 1px solid rgba(212, 0, 0, 0.5); color: #ff9a9a;
+  }
+  .rc-banner-actions {
+    display: flex;
+    gap: 6px;
+    margin-top: 6px;
+    flex-wrap: wrap;
   }
   .rc-banner-warn {
     background: rgba(232, 163, 23, 0.14); border: 1px solid rgba(232, 163, 23, 0.45); color: #f0b443;

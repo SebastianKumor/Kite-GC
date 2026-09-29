@@ -70,12 +70,15 @@ export async function loadFenceConfig(): Promise<void> {
   }
 }
 
-/** "Save to FC": upload the working copy (geometry + params), then re-read so loaded == FC truth. */
-export async function saveFenceConfig(): Promise<void> {
+/** "Save to FC": upload the working copy (geometry + params), then re-read so loaded == FC truth.
+ *  Resolves with the parameters Kite could not write (`NAME: reason`, empty when all went through) —
+ *  the geometry is on the vehicle by then, so a parameter failure is a warning, not a failed save. */
+export async function saveFenceConfig(): Promise<string[]> {
   const cfg = get(fenceWorking);
-  if (!cfg) return;
-  await invoke('fence_write_all', { config: cfg });
+  if (!cfg) return [];
+  const warnings = await invoke<string[]>('fence_write_all', { config: cfg });
   await loadFenceConfig();
+  return warnings;
 }
 
 export function revertFenceWorking(): void {

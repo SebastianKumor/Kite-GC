@@ -98,26 +98,42 @@ pub fn send_command_int(
     result
 }
 
-/// Set a single FC parameter (fire-and-forget `PARAM_SET`). Used for tunables that have no dedicated
-/// command — e.g. the fixed-wing loiter radius (`WP_LOITER_RAD`). ArduPilot ignores `param_type` for
-/// its REAL32 params; we don't wait for the PARAM_VALUE echo (non-critical, keeps it simple).
+/// Set a single FC parameter. Used for tunables that have no dedicated command — e.g. the fixed-wing
+/// loiter radius (`WP_LOITER_RAD`). ArduPilot ignores `param_type` for its REAL32 params, so there the
+/// `PARAM_SET` goes out fire-and-forget; on PX4 the parameter is READ first (`PARAM_REQUEST_READ`, the
+/// reply carries the declared type; up to `params_rt::PARAM_TIMEOUT`) and an unknown or silent
+/// parameter is an `Err`. Neither path waits for the PARAM_VALUE echo of the write (non-critical, keeps
+/// it simple).
 pub fn set_param(
     cmd_tx: &mpsc::Sender<MavlinkCommand>,
     fc_sysid: u8,
     name: &str,
     value: f32,
+    px4: bool,
 ) -> Result<(), String> {
     let mut param_id = [0u8; 16];
     let bytes = name.as_bytes();
     let n = bytes.len().min(16);
     param_id[..n].copy_from_slice(&bytes[..n]);
 
+    // ArduPilot takes any parameter as a REAL32 number. PX4 insists on the parameter's declared type
+    // AND byte-casts integers into the float field ("param types mismatch" otherwise) — so on PX4 read
+    // the type first and encode accordingly.
+    let (param_value, param_type) = if px4 {
+        match super::params_rt::read_params_typed(cmd_tx, fc_sysid, &[name]).get(name) {
+            Some((_, ty)) => (super::params_rt::encode_param_bytecast(value, *ty), *ty),
+            None => return Err(format!("Parameter {name} not reported by the FC")),
+        }
+    } else {
+        (value, MavParamType::MAV_PARAM_TYPE_REAL32)
+    };
+
     send(cmd_tx, MavMessage::PARAM_SET(PARAM_SET_DATA {
         target_system: fc_sysid,
         target_component: AUTOPILOT_COMPONENT,
         param_id: param_id.into(),
-        param_value: value,
-        param_type: MavParamType::MAV_PARAM_TYPE_REAL32,
+        param_value,
+        param_type,
     }))
 }
 

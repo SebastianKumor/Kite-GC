@@ -178,6 +178,10 @@
     "manual": {
       "title": "Manual control (PX4)",
       "comRcInModeHint": "PX4 only accepts these inputs when COM_RC_IN_MODE allows a MAVLink/joystick source (not 'RC only'). Set it in PX4/QGC if the sticks don't respond.",
+      "comRcInModeBlocked": "COM_RC_IN_MODE = {value} on this vehicle: PX4 ignores joystick input. Set it to 2 (RC and joystick) to fly from here.",
+      "comRcInModeOk": "COM_RC_IN_MODE = {value}: joystick input allowed. Sticks act in manual modes (Position / Altitude / Stabilized), not in Hold, Takeoff or Mission.",
+      "comRcInModeRead": "Re-read",
+      "comRcInModeFix": "Allow joystick (set 2)",
       "sticks": "Sticks",
       "roll": "Roll",
       "pitch": "Pitch",
@@ -533,6 +537,8 @@
     "saveTitle": "Save geofence to FC",
     "saveMsg": "Write all fence zones and parameters to the flight controller?",
     "saveConfirm": "Save",
+    "saveFailed": "Saving to the FC failed: {error}",
+    "paramsNotWritten": "Fence saved, but these parameters were not written: {params}",
     "armedLocked": "Fence editing is disabled while armed.",
     "breach": "Geofence breach"
   },
@@ -551,6 +557,8 @@
     "saveTitle": "Save rally points to FC",
     "saveMsg": "Write all rally points and parameters to the flight controller?",
     "saveConfirm": "Save",
+    "saveFailed": "Saving to the FC failed: {error}",
+    "paramsNotWritten": "Rally points saved, but these parameters were not written: {params}",
     "armedLocked": "Rally editing is disabled while armed."
   },
   "about": {
