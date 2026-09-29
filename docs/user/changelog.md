@@ -274,8 +274,8 @@ inside the box of the feature release they belong to, so the notes for one relea
       work as over a direct MSP link — over ELRS/mLRS MAVLink, SiK radios or a Wi-Fi bridge. Telemetry
       stays MAVLink; nothing is polled through the tunnel. RC control and FC-side ADS-B are not on this
       path yet. The work also surfaced an INAV firmware bug in long tunnel replies (fixed upstream). [#202]
-    - **UDP links: a busy local port falls back to a stable alternate, a peer going away no longer
-      ends the link, and commands reach every recent sender.** When another program already listens on
+    - **UDP links: a busy local port falls back to a stable alternate, and commands reach every recent
+      sender.** When another program already listens on
       the port you target (Mission Planner on 14550, say), Kite now binds the same port plus 10000
       instead of a random one, so a relay that streams to Kite's address finds it again after a
       reconnect — and a failed handshake names the busy port and what to do about it. Frames go to every
@@ -413,3 +413,5 @@ inside the box of the feature release they belong to, so the notes for one relea
 [#196]: https://github.com/b14ckyy/Kite-GC/pull/196
 [#198]: https://github.com/b14ckyy/Kite-GC/pull/198
 [#202]: https://github.com/b14ckyy/Kite-GC/pull/202
+[#194]: https://github.com/b14ckyy/Kite-GC/pull/194
+[#204]: https://github.com/b14ckyy/Kite-GC/pull/204
