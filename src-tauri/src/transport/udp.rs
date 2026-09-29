@@ -175,8 +175,10 @@ impl ByteTransport for UdpTransport {
                 Ok(0)
             }
             Err(ref e) if Self::is_peer_unreachable(e) => {
-                let peer = self.peer;
-                self.note_peer_unreachable("recv", peer, e);
+                // The ICMP error carries no source: with one learned peer that is the one that went away,
+                // otherwise the best we can name is the configured target.
+                let peer = if self.peers.len() == 1 { self.peers.keys().copied().next() } else { None };
+                self.note_peer_unreachable("recv", peer.unwrap_or(self.peer), e);
                 Ok(0)
             }
             Err(e) => Err(TransportError::from(e)),
@@ -206,6 +208,7 @@ impl ByteTransport for UdpTransport {
                 Ok(_) => delivered += 1,
                 Err(ref e) if Self::is_peer_unreachable(e) => self.note_peer_unreachable("send", addr, e),
                 Err(e) => {
+                    log::debug!("UDP send to {} failed: {}", addr, e);
                     first_err.get_or_insert_with(|| TransportError::Io(format!("UDP send to {} failed: {}", addr, e)));
                 }
             }
