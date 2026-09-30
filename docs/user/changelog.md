@@ -58,12 +58,15 @@ inside the box of the feature release they belong to, so the notes for one relea
       error under the Save button.
     - **Relay and GPS fix state: one fix scale for every link.** Passive links (LTM, CRSF, SmartPort)
       reported the fix on a different scale than MSP and MAVLink, so the Relay re-encoded an INAV or
-      ArduPilot 3D fix as 2D, the map's "go to aircraft" gate never opened on an INAV link, and the
-      GPS widget showed the fix wrongly — an INAV 3D fix in amber, a passive 2D fix as "3D" and a
-      passive 3D fix as "3D DGPS". All links now use 0 none / 1 2D / 2 3D / 3 DGPS-RTK, and the Relay
-      maps it correctly for every output. One visible consequence on passive links: a 2D fix now counts
-      as "no 3D fix" everywhere, the same as on MSP and MAVLink — home is not seeded at arm and the GPS
-      warning shows until the fix is 3D.
+      ArduPilot 3D fix as 2D on its LTM and MAVLink outputs and as "no fix" on SmartPort, the map's
+      automatic jump to the aircraft on its first fix never happened on an INAV link (and only with an
+      RTK fix on ArduPilot/PX4), and the GPS widget coloured a plain 3D fix amber and labelled a passive
+      2D fix "3D". All links now use 0 none / 1 2D / 2 3D / 3 DGPS-RTK, and the Relay maps it correctly
+      for every output. One visible consequence on passive links: a 2D fix now counts as "no 3D fix"
+      everywhere, the same as on MSP and MAVLink — no home is set for that flight until the fix is 3D,
+      and ADS-B conflict alerts and the radar distance reference wait for it. Also fixed on the way: the
+      2D map no longer jumps to the aircraft when you framed a mission in the meantime, and the
+      FormationFlight radar answer reports the fix on INAV's scale.
     ---
 
     **1.0.1**{ .kite-patch } *2026-09-13*{ .kite-badge }
