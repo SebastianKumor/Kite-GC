@@ -1226,7 +1226,7 @@
 
       // Go-to-UAV on connect: jump once to the craft (range ~600 m ≈ 2D zoom 16), deferred to the first
       // 3D fix. Free look only; follow/orbit/fpv already track the UAV.
-      if (pendingUavJump3d && isFreeLook() && telem.fixType >= 3 && telem.numSat >= MIN_FIX_SATELLITES) {
+      if (pendingUavJump3d && isFreeLook() && telem.fixType >= 2 && telem.numSat >= MIN_FIX_SATELLITES) {
         pendingUavJump3d = false;
         viewer.camera.flyToBoundingSphere(
           new Cesium.BoundingSphere(Cesium.Cartesian3.fromDegrees(telem.lon, telem.lat, alt), 1),

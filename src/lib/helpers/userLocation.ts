@@ -106,7 +106,7 @@ connection.subscribe((c) => { if (c.status !== 'connected') uavFixCaptured = fal
 telemetry.subscribe((t) => {
   if (uavFixCaptured) return;
   const hdopOk = t.gpsHdop <= 0 || t.gpsHdop < GPS_HDOP_MAX; // 0 = unknown → accept
-  if (t.fixType >= 3 && hdopOk && isValidGpsCoordinate(t.lat, t.lon)) {
+  if (t.fixType >= 2 && hdopOk && isValidGpsCoordinate(t.lat, t.lon)) { // 3D fix or better
     uavFixCaptured = true;
     setUserLocation(t.lat, t.lon, 'uav-gps');
   }
