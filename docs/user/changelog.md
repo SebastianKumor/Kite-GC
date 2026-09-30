@@ -67,6 +67,11 @@ inside the box of the feature release they belong to, so the notes for one relea
       and ADS-B conflict alerts and the radar distance reference wait for it. Also fixed on the way: the
       2D map no longer jumps to the aircraft when you framed a mission in the meantime, and the
       FormationFlight radar answer reports the fix on INAV's scale.
+    - **Your location is no longer taken from the aircraft.** The first 3D fix of a connection was
+      stored as your own position and, in the GCS modes without an OS fix, moved the GCS marker to the
+      aircraft — on a reconnect in flight, to an airborne aircraft. Now, while your own position is
+      unknown, the aircraft's home position stands in for the GCS location; a manually set GCS
+      position and a live OS position keep precedence.
     ---
 
     **1.0.1**{ .kite-patch } *2026-09-13*{ .kite-badge }
