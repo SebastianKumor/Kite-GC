@@ -2712,7 +2712,7 @@
       const cesiumFactor = lightingActive
         ? cesiumLikeBrightness(sunAltitudeDeg(clockDate, view.lat, view.lon))
         : 1.0;
-      const u = resolveUserLocation(); // OS geo → UAV GPS → home → persisted map centre (NOT camera)
+      const u = resolveUserLocation(); // OS geo → home → persisted map centre (NOT camera)
       const nightFactor = cesiumLikeBrightness(sunAltitudeDeg(new Date(), u.lat, u.lon));
       factor = Math.min(cesiumFactor, nightFactor) / cesiumFactor;
     }
