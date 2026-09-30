@@ -1648,6 +1648,7 @@
     if (!map || viewMode !== 'free' || get(replayActive)) return;
     const pts = collectMissionLatLngs();
     if (pts.length === 0) return;
+    pendingUavJump = false; // a mission load is the latest positioning intent (same as the 3D map)
     map.fitBounds(L.latLngBounds(pts), { padding: [40, 40], maxZoom: 16 });
   }
 
