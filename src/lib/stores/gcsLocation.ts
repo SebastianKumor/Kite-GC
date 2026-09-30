@@ -11,10 +11,18 @@
 //  - continuous: follows the OS location API live; the marker only moves on a > 20 m change (anti-jitter).
 //                Falls back to the last known position while the watch has delivered nothing, so a
 //                platform that denies or lacks the Geolocation API still shows a marker.
+//
+// Precedence (manual / continuous): a manual override (manual mode only) or a delivered watch fix
+// (continuous) > `userGeoLocation` (OS fix or the value persisted from the last session) > the home
+// position (FC home, or the manual launch/home reference; never a replay's start point). The home
+// fallback only fills an otherwise empty position and never replaces one of the sources above it; it
+// carries no accuracy. The aircraft's own GPS fix is never used as the GCS location.
 
 import { writable, get } from 'svelte/store';
 import { settings, type GcsMode } from '$lib/stores/settings';
 import { userGeoLocation, userGeoAccuracyM, type LatLon } from '$lib/helpers/userLocation';
+import { homePosition } from '$lib/stores/home';
+import { isValidGpsCoordinate } from '$lib/helpers/telemetry';
 import { haversineDistance } from '$lib/utils/geo';
 
 /** Current GCS position, or null (mode off / not yet resolved). */
@@ -39,6 +47,16 @@ function clearWatch() {
   watchDelivered = false;
 }
 
+/** Last resort while no OS position is known: the home position, when one is set. A replay's start
+ *  point is excluded — it is where a past flight began, not where the operator stands now. */
+function homeFallback(): LatLon | null {
+  const h = get(homePosition);
+  // Only the FLIGHT CONTROLLER's home counts: a 'manual' home is the launch point, which the mission
+  // editor may place at the first waypoint or the map centre — that must never move the GCS marker.
+  if (!h.set || h.source !== 'fc' || !isValidGpsCoordinate(h.lat, h.lon)) return null;
+  return { lat: h.lat, lon: h.lon };
+}
+
 /** Recompute the GCS position for off / manual, and drive continuous while its watch has produced
  *  nothing yet (see the fallback rationale below). */
 function recompute() {
@@ -51,25 +69,32 @@ function recompute() {
       gcsLocation.set(manualOverride);
       gcsAccuracyM.set(null); // a hand-placed point has no measured accuracy
     } else {
-      gcsLocation.set(get(userGeoLocation));
-      gcsAccuracyM.set(get(userGeoAccuracyM));
+      const geo = get(userGeoLocation);
+      gcsLocation.set(geo ?? homeFallback());
+      gcsAccuracyM.set(geo ? get(userGeoAccuracyM) : null);
     }
   } else if (mode === 'continuous' && !watchDelivered) {
     // Continuous normally owns the marker through its watch, but the watch can never deliver on a
     // platform where the Geolocation API is denied or unimplemented. `continuous` is also the DEFAULT
     // mode, so the marker was then missing for the whole session even though `userGeoLocation` already
-    // held a position: a one-shot OS fix, the value persisted from the last session, the connected
-    // UAV's own GPS fix, or on macOS every fix from native CoreLocation (see helpers/userLocation.ts).
+    // held a position: a one-shot OS fix, the value persisted from the last session, or on macOS
+    // every fix from native CoreLocation (see helpers/userLocation.ts).
     // Follow that position until the watch delivers its first fix, which is what makes continuous
     // actually track on macOS. Gating on `watchDelivered` rather than on an empty marker matters: a
     // null check stops after the first seed, leaving the marker frozen wherever the operator happened
     // to be when it arrived. Same 20 m anti-jitter gate as the watch below.
     const next = get(userGeoLocation);
-    const cur = get(gcsLocation);
-    if (next && (!cur || haversineDistance(cur.lat, cur.lon, next.lat, next.lon) > CONT_MIN_MOVE_M)) {
-      gcsLocation.set(next);
+    if (next) {
+      const cur = get(gcsLocation);
+      if (!cur || haversineDistance(cur.lat, cur.lon, next.lat, next.lon) > CONT_MIN_MOVE_M) {
+        gcsLocation.set(next);
+      }
+      gcsAccuracyM.set(get(userGeoAccuracyM));
+    } else {
+      // No OS position at all yet: the home position stands in (null while there is none).
+      gcsLocation.set(homeFallback());
+      gcsAccuracyM.set(null);
     }
-    gcsAccuracyM.set(get(userGeoAccuracyM));
   }
 }
 
@@ -128,3 +153,5 @@ settings.subscribe((s) => {
 // In manual mode (no override), the GCS follows the resolved OS location + its accuracy.
 userGeoLocation.subscribe(() => recompute());
 userGeoAccuracyM.subscribe(() => recompute());
+// ... and the home position while no OS location is known (see homeFallback()).
+homePosition.subscribe(() => recompute());
