@@ -56,6 +56,14 @@ inside the box of the feature release they belong to, so the notes for one relea
       a timeout, an item the FC refused — nothing was shown and the Save button simply came back,
       while what the vehicle actually held might not have matched the panel. The panel now shows the
       error under the Save button.
+    - **Relay and GPS fix state: one fix scale for every link.** Passive links (LTM, CRSF, SmartPort)
+      reported the fix on a different scale than MSP and MAVLink, so the Relay re-encoded an INAV or
+      ArduPilot 3D fix as 2D, the map's "go to aircraft" gate never opened on an INAV link, and the
+      GPS widget showed the fix wrongly — an INAV 3D fix in amber, a passive 2D fix as "3D" and a
+      passive 3D fix as "3D DGPS". All links now use 0 none / 1 2D / 2 3D / 3 DGPS-RTK, and the Relay
+      maps it correctly for every output. One visible consequence on passive links: a 2D fix now counts
+      as "no 3D fix" everywhere, the same as on MSP and MAVLink — home is not seeded at arm and the GPS
+      warning shows until the fix is 3D.
     ---
 
     **1.0.1**{ .kite-patch } *2026-09-13*{ .kite-badge }
