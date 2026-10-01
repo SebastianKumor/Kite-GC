@@ -3179,11 +3179,16 @@
   // The Windows main window starts hidden (`visible: false` in tauri.windows.conf.json): it is
   // `transparent: true` for the native-video hole punch, so before the WebView's first paint the
   // whole app area was see-through to the desktop with only the frame visible. Show it once the
-  // UI is actually mounted. No-op on platforms whose window starts visible.
+  // UI is actually mounted. No-op on platforms whose window starts visible. A failure here is
+  // fatal for a portable build (no window-state plugin to show the window instead — it was the
+  // missing `core:window:allow-show` permission once), so it goes to the file log, not into void.
   onMount(() => {
     void import('@tauri-apps/api/webviewWindow').then(({ getCurrentWebviewWindow }) => {
       const win = getCurrentWebviewWindow();
-      void win.show().then(() => win.setFocus()).catch(() => {});
+      const failed = (what: string) => (e: unknown) => {
+        void invoke('log_frontend', { level: 'error', area: 'ui', message: `main window ${what} failed: ${String(e)}` }).catch(() => {});
+      };
+      void win.show().then(() => win.setFocus().catch(failed('focus')), failed('show'));
     });
   });
 
