@@ -1520,12 +1520,18 @@ mod tests {
         assert_eq!(rows.len(), 1);
     }
 
-    /// Real two-GPS log (ArduPlane 4.3.3) from Marc's machine — before the fix both receivers were
-    /// interleaved (max step 232 m, ~41800 rows).
+    /// Regression check on a real two-GPS DataFlash log: before the fix both receivers were interleaved
+    /// (ArduPlane 4.3.3 reference log: max step 232 m over ~41800 rows; fixed: 7.3 m over 20923 rows).
+    /// Ignored by default — point `KITE_DATAFLASH_TEST_LOG` at a `.bin` from an aircraft with two
+    /// receivers and run `cargo test real_two_gps_log -- --ignored --nocapture`.
     #[test]
     #[ignore]
     fn real_two_gps_log_has_a_smooth_track() {
-        let data = std::fs::read(r"F:\Downloads\2026-10-01 10-34-22.bin").expect("test log missing");
+        let Ok(path) = std::env::var("KITE_DATAFLASH_TEST_LOG") else {
+            eprintln!("KITE_DATAFLASH_TEST_LOG not set — skipping");
+            return;
+        };
+        let data = std::fs::read(&path).unwrap_or_else(|e| panic!("cannot read {path}: {e}"));
         let mut scanner = DataFlashScanner::new(&data);
         let mut state = DecoderState::default();
         let mut stats = DecodeStats::default();
@@ -1541,7 +1547,9 @@ mod tests {
             })
             .fold(0.0_f64, f64::max);
         println!("rows = {}, max step = {:.2} m", rows.len(), max_step);
-        assert!((20_700..=21_100).contains(&rows.len()), "row count {}", rows.len());
-        assert!(max_step < 20.0, "max step {max_step:.2} m");
+        assert!(!rows.is_empty(), "no GPS rows decoded from {path}");
+        // Interleaved receivers jump by their mutual offset (hundreds of metres); a single receiver
+        // at log rate moves a few metres per row.
+        assert!(max_step < 50.0, "max step {max_step:.2} m");
     }
 }
