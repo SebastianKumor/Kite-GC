@@ -92,10 +92,23 @@ ios_regenerate_project() {
     fi
 }
 
+# Build scripts bake the Xcode path into target/. After Xcode moves, the link fails with
+# "library 'clang_rt.ios' not found" until the iOS targets are rebuilt.
+ios_clean_stale_toolchain() {
+    local stale
+    stale="$(cat src-tauri/target/aarch64-apple-ios*/*/build/*/output 2>/dev/null \
+        | grep -oE '/Applications/[^/]+\.app' | sort -u \
+        | while read -r xc; do [ -d "$xc" ] || echo "$xc"; done)"
+    [ -n "$stale" ] || return 0
+    echo "      iOS build cache points at a removed Xcode ($(echo $stale)), cleaning the iOS Rust targets..."
+    (cd src-tauri && cargo clean --target aarch64-apple-ios && cargo clean --target aarch64-apple-ios-sim)
+}
+
 # Generate the Xcode project if it is missing (or FORCE_INIT=1), then make sure it is one that keeps
 # libapp.a out of the app bundle. Regenerates only when something actually needs it, so a project
 # that is already correct is left alone.
 ios_prepare_project() {
+    ios_clean_stale_toolchain
     if [ ! -d "$GEN_APPLE" ] || [ "${FORCE_INIT:-0}" = "1" ]; then
         echo "      Generating the Xcode project (tauri ios init)..."
         npm run tauri ios init

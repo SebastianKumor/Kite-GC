@@ -50,7 +50,7 @@ fi
 
 # Refuse early rather than burning a notary submission on a payload Apple will reject.
 # The signature lives on the .app INSIDE the image, so mount it read-only and check there.
-echo "[1/5] Checking the app inside the .dmg is signed for distribution..."
+echo "[1/6] Checking the app inside the .dmg is signed for distribution..."
 # An image can only be attached once, so a maintainer who already opened the .dmg in Finder would
 # otherwise hit a bare "hdiutil: attach failed" and, under set -e, a silent exit. Reuse the existing
 # mount instead, and only detach what this script attached itself.
@@ -123,7 +123,7 @@ trap - EXIT
 # The disk image itself should carry a signature too, separate from the app inside it. Whether the
 # bundler already signed it depends on the Tauri version, so check rather than assume: signing the
 # wrapper is idempotent and never touches the payload, unlike re-signing the app.
-echo "[2/5] Checking the .dmg wrapper signature..."
+echo "[2/6] Checking the .dmg wrapper signature..."
 DMG_SIG="$(codesign -dvv "$DMG" 2>&1 || true)"   # captured, not piped: see the SIGPIPE note above
 if printf '%s' "$DMG_SIG" | grep -q '^Authority=Developer ID Application'; then
     echo "       Already signed by the bundler, leaving it alone."
@@ -137,7 +137,7 @@ else
     exit 1
 fi
 
-echo "[3/5] Submitting the .dmg to Apple notary service (this can take a few minutes)..."
+echo "[3/6] Submitting the .dmg to Apple notary service (this can take a few minutes)..."
 if [ -n "${NOTARY_PROFILE:-}" ]; then
     # Preferred: credentials live in the login keychain, nothing secret touches the process args.
     xcrun notarytool submit "$DMG" --keychain-profile "$NOTARY_PROFILE" --wait
@@ -150,10 +150,29 @@ else
         --password "$APPLE_APP_PASSWORD" --wait
 fi
 
-echo "[4/5] Stapling the notarization ticket to the .dmg..."
+echo "[4/6] Stapling the notarization ticket to the .dmg..."
 xcrun stapler staple "$DMG"
 
-echo "[5/5] Verifying..."
+echo "[5/6] Stapling the app in the standalone .zip and the updater .tar.gz..."
+# Both were packed before notarization, so their app has no ticket and an offline first launch warns.
+ZIP="$(ls "$OUT"/*_standalone.zip 2>/dev/null | head -1 || true)"
+TGZ="$(ls "$OUT"/*_update.tar.gz 2>/dev/null | head -1 || true)"
+if [ -n "$ZIP" ]; then
+    WORK="$(mktemp -d)"
+    ditto -x -k "$ZIP" "$WORK"
+    STAPLE_APP="$(ls -d "$WORK"/*.app | head -1)"
+    xcrun stapler staple "$STAPLE_APP"
+    (cd "$WORK" && ditto -c -k --keepParent "$(basename "$STAPLE_APP")" "$ZIP")
+    if [ -n "$TGZ" ]; then
+        tar -czf "$TGZ" -C "$WORK" "$(basename "$STAPLE_APP")"
+        rm -f "$TGZ.sig"   # signed over the old bytes, it would no longer verify
+    fi
+    rm -rf "$WORK"
+else
+    echo "       No standalone .zip in $OUT, nothing to staple besides the .dmg."
+fi
+
+echo "[6/6] Verifying..."
 # What a user's Mac actually evaluates on first open.
 spctl --assess --type open --context context:primary-signature -v "$DMG"
 
