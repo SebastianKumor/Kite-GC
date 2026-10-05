@@ -60,6 +60,17 @@ if [ -f "$MAC_UPDATE" ] && ! grep -qE '^[^/]+\.app/Contents/CodeResources$' <<< 
     echo "           Use the signed macOS build (just notarize-macos), or remove it to release without macOS." >&2
     exit 1
 fi
+# On a Mac, also check the ticket itself, not just its file name.
+if [ -f "$MAC_UPDATE" ] && command -v xcrun >/dev/null; then
+    CHECK="$(mktemp -d)"
+    tar -xzf "$MAC_UPDATE" -C "$CHECK"
+    if ! xcrun stapler validate "$(ls -d "$CHECK"/*.app | head -1)" >/dev/null; then
+        rm -rf "$CHECK"
+        echo "[manifest] $(basename "$MAC_UPDATE") has a CodeResources file but no valid ticket." >&2
+        exit 1
+    fi
+    rm -rf "$CHECK"
+fi
 
 # 1. Sign what is unsigned. `tauri signer sign` writes <file>.sig beside the file and reads the key
 #    from the TAURI_SIGNING_PRIVATE_KEY(_PATH) environment. The key has no password, but the CLI still

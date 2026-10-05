@@ -95,8 +95,8 @@ ios_regenerate_project() {
 # Build scripts bake the Xcode path into target/. After Xcode moves, the link fails with
 # "library 'clang_rt.ios' not found" until the iOS targets are rebuilt.
 ios_clean_stale_toolchain() {
-    local stale
-    stale="$(cat src-tauri/target/aarch64-apple-ios*/*/build/*/output 2>/dev/null \
+    local stale target="${CARGO_TARGET_DIR:-src-tauri/target}"
+    stale="$(cat "$target"/aarch64-apple-ios*/*/build/*/output 2>/dev/null \
         | grep -oE '/Applications/[^/]+\.app' | sort -u \
         | while read -r xc; do [ -d "$xc" ] || echo "$xc"; done)"
     [ -n "$stale" ] || return 0

@@ -157,19 +157,21 @@ echo "[5/6] Stapling the app in the standalone .zip and the updater .tar.gz..."
 # Both were packed before notarization, so their app has no ticket and an offline first launch warns.
 ZIP="$(ls "$OUT"/*_standalone.zip 2>/dev/null | head -1 || true)"
 TGZ="$(ls "$OUT"/*_update.tar.gz 2>/dev/null | head -1 || true)"
-if [ -n "$ZIP" ]; then
+if [ -n "$ZIP" ] || [ -n "$TGZ" ]; then
     WORK="$(mktemp -d)"
-    ditto -x -k "$ZIP" "$WORK"
+    if [ -n "$ZIP" ]; then ditto -x -k "$ZIP" "$WORK"; else tar -xzf "$TGZ" -C "$WORK"; fi
     STAPLE_APP="$(ls -d "$WORK"/*.app | head -1)"
     xcrun stapler staple "$STAPLE_APP"
-    (cd "$WORK" && ditto -c -k --keepParent "$(basename "$STAPLE_APP")" "$ZIP")
+    if [ -n "$ZIP" ]; then
+        (cd "$WORK" && ditto -c -k --keepParent "$(basename "$STAPLE_APP")" "$ZIP")
+    fi
     if [ -n "$TGZ" ]; then
         tar -czf "$TGZ" -C "$WORK" "$(basename "$STAPLE_APP")"
         rm -f "$TGZ.sig"   # signed over the old bytes, it would no longer verify
     fi
     rm -rf "$WORK"
 else
-    echo "       No standalone .zip in $OUT, nothing to staple besides the .dmg."
+    echo "       No standalone .zip or updater .tar.gz in $OUT, nothing to staple besides the .dmg."
 fi
 
 echo "[6/6] Verifying..."
