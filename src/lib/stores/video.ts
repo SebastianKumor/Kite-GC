@@ -21,7 +21,7 @@ import { writable, get } from 'svelte/store';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { t } from 'svelte-i18n';
-import { isLinux, isMobile } from '$lib/platform';
+import { isLinux, isMobile, hasVideo } from '$lib/platform';
 import {
   type NativeDevice,
   type CaptureMode,
@@ -1725,6 +1725,8 @@ export async function startNative(): Promise<void> {
 
 /** Start whichever source kind is currently selected. */
 export function startActive(): Promise<void> {
+  // iPhone: the panel has no Stop, so a saved `enabled` must not auto-start a source.
+  if (!hasVideo) return Promise.resolve();
   const kind = get(videoState).kind;
   if (kind === 'rtsp') return startRtsp();
   if (kind === 'native') return startNative();

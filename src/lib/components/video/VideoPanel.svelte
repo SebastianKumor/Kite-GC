@@ -60,10 +60,7 @@
   import Button from '$lib/components/panel/Button.svelte';
   import NumberStepper from '$lib/components/NumberStepper.svelte';
   import Toggle from '$lib/components/panel/Toggle.svelte';
-  import { isLinux, isMobile, isAndroid, isIOS, isPhone } from '$lib/platform';
-
-  // Video is iPad-only on iOS (RTSP_APPLE.md): the iPhone gets a placeholder, no sources.
-  const iphoneNoVideo = isIOS && isPhone;
+  import { isLinux, isMobile, isAndroid, isPhone, hasVideo } from '$lib/platform';
 
   // Which saved RTSP connection is being edited inline (null = none).
   let editingRtspId = $state<string | null>(null);
@@ -694,7 +691,7 @@
 {/snippet}
 
 <div class="vpv2">
-  {#if iphoneNoVideo}
+  {#if !hasVideo}
     <PanelShell variant="compact" title={$t('video.title')} body={iphoneBody} />
   {:else}
     <PanelShell variant="compact" title={$t('video.title')} {headerActions} {body} />
