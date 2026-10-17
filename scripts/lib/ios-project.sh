@@ -99,7 +99,7 @@ ios_clean_stale_toolchain() {
     local stale target="${CARGO_TARGET_DIR:-target}"
     case "$target" in /*) ;; *) target="$PWD/src-tauri/$target" ;; esac
     stale="$(cat "$target"/aarch64-apple-ios*/*/build/*/output 2>/dev/null \
-        | sed -n 's/^cargo:rustc-link-search=\(native=\)\{0,1\}//p' | grep '/Xcode' | sort -u \
+        | sed -n 's/^cargo:rustc-link-search=\(native=\)\{0,1\}//p' | grep '/Contents/Developer/' | sort -u \
         | while read -r dir; do [ -d "$dir" ] || echo "$dir"; done)"
     [ -n "$stale" ] || return 0
     echo "      iOS build cache points at a missing Xcode dir ($(echo $stale | head -c 200)), cleaning the iOS Rust targets..."
