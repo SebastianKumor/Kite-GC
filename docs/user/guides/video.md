@@ -166,11 +166,11 @@ How interactive the swapped-in **mini-map** is depends on where it landed:
   (right-drag and two fingers reach the map). The zoom buttons are hidden there to save room — use the
   mouse wheel, the touchpad or a pinch. To **move the floating frame itself**, drag the **square handle
   in its bottom-left corner**, the same one as in video mode.
-- **On a phone** (docked window or widget) — the widget's limits apply: 2D, follow, no panning. Tap
+- **On an Android phone** (docked window or widget) — the widget's limits apply: 2D, follow, no panning. Tap
   the small map to switch heading-up / north-up, slide a finger up or down on it to zoom (or pinch).
   Double-tap swaps. With the video full-screen, the corner button becomes a **map button** that hides
   and shows the small map; double-tap the full-screen video to send the map back. Unobstructed
-  fullscreen does not exist on the phone — the video fills the map area next to the widget column.
+  fullscreen does not exist on the Android phone — the video fills the map area next to the widget column.
 
 ![The map swapped into the video — mini-map over a full-screen feed](../assets/guides/video/video_map_swap.png)
 /// caption

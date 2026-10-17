@@ -961,8 +961,8 @@ export interface NativeRtspStats {
   rtpLate: number;
   /** Received link bitrate over the last poll interval, kbit/s. */
   kbps: number;
-  /** `droppedHidden`: frames decoded but released unrendered while no surface was on screen
-   *  (the Android sink's off-screen mode, PHONE_VIDEO.md D7) — 0 on the other sinks. */
+  /** `droppedHidden`: frames not shown while no surface was on screen. Android decodes and releases
+   *  them (PHONE_VIDEO.md D7), the Apple sink skips decoding; 0 on the other sinks. */
   sink: { presentedFps: number; droppedHidden: number; width: number | null; height: number | null; codec: string | null } | null;
 }
 export const nativeRtspStats = writable<NativeRtspStats | null>(null);
