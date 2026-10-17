@@ -63,13 +63,12 @@ fi
 # On a Mac, also check the ticket itself, not just its file name.
 if [ -f "$MAC_UPDATE" ] && command -v xcrun >/dev/null; then
     CHECK="$(mktemp -d)"
+    trap 'rm -rf "$CHECK"' EXIT
     tar -xzf "$MAC_UPDATE" -C "$CHECK"
     if ! xcrun stapler validate "$(ls -d "$CHECK"/*.app | head -1)" >/dev/null; then
-        rm -rf "$CHECK"
         echo "[manifest] $(basename "$MAC_UPDATE") has a CodeResources file but no valid ticket." >&2
         exit 1
     fi
-    rm -rf "$CHECK"
 fi
 
 # 1. Sign what is unsigned. `tauri signer sign` writes <file>.sig beside the file and reads the key
@@ -79,7 +78,8 @@ export TAURI_SIGNING_PRIVATE_KEY_PASSWORD="${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:
 for entry in "${PLATFORMS[@]}"; do
     file="${entry#* }"; file="${file##* }"
     [ -f "$OUT/$file" ] || continue
-    if [ ! -f "$OUT/$file.sig" ]; then
+    # Re-sign an archive rewritten after packing (stapling), or its old .sig fails in the updater.
+    if [ ! -f "$OUT/$file.sig" ] || [ "$OUT/$file" -nt "$OUT/$file.sig" ]; then
         echo "[manifest] signing $file"
         (cd "$ROOT" && npx tauri signer sign "$OUT/$file" </dev/null >/dev/null)
     fi

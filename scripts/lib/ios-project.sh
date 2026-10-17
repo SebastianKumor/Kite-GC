@@ -92,19 +92,19 @@ ios_regenerate_project() {
     fi
 }
 
-# Build scripts bake the Xcode path into target/. After Xcode moves, the link fails with
-# "library 'clang_rt.ios' not found" until the iOS targets are rebuilt.
+# Build scripts (swift-rs) cache Xcode's versioned clang dir in target/. Once it is gone (Xcode moved or
+# updated across a clang major), the link fails with "library 'clang_rt.ios' not found".
 ios_clean_stale_toolchain() {
     # Tauri runs cargo in src-tauri, so a relative CARGO_TARGET_DIR is relative to that.
     local stale target="${CARGO_TARGET_DIR:-target}"
     case "$target" in /*) ;; *) target="$PWD/src-tauri/$target" ;; esac
     stale="$(cat "$target"/aarch64-apple-ios*/*/build/*/output 2>/dev/null \
-        | grep -oE '/Applications/[^/]+\.app' | sort -u \
-        | while read -r xc; do [ -d "$xc" ] || echo "$xc"; done)"
+        | sed -n 's/^cargo:rustc-link-search=\(native=\)\{0,1\}//p' | grep '/Xcode' | sort -u \
+        | while read -r dir; do [ -d "$dir" ] || echo "$dir"; done)"
     [ -n "$stale" ] || return 0
-    echo "      iOS build cache points at a removed Xcode ($(echo $stale)), cleaning the iOS Rust targets..."
-    (cd src-tauri && cargo clean --target-dir "$target" --target aarch64-apple-ios \
-        && cargo clean --target-dir "$target" --target aarch64-apple-ios-sim)
+    echo "      iOS build cache points at a missing Xcode dir ($(echo $stale | head -c 200)), cleaning the iOS Rust targets..."
+    # Not `cargo clean --target`: without -p it ignores the target and wipes the whole dir.
+    rm -rf "$target/aarch64-apple-ios" "$target/aarch64-apple-ios-sim"
 }
 
 # Generate the Xcode project if it is missing (or FORCE_INIT=1), then make sure it is one that keeps

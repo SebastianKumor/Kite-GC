@@ -3,8 +3,9 @@
 # Copyright (C) 2026 Marc Hoffmann (b14ckyy)
 # ============================================================
 # Kite Ground Control — macOS notarize + staple (LOCAL ONLY)
-# Submits the collected .dmg to Apple's notary service and staples the ticket,
-# so it opens with no Gatekeeper warning on any Mac.
+# Submits the collected .dmg to Apple's notary service and staples the ticket to
+# the .dmg and to the app in the standalone .zip and the updater .tar.gz, so each
+# opens with no Gatekeeper warning on any Mac, even offline.
 #
 # THE APP IS NOT SIGNED HERE. That happens during the build, because the .dmg
 # has to wrap an ALREADY-SIGNED .app: Apple inspects the app inside the image,
@@ -159,6 +160,7 @@ ZIP="$(ls "$OUT"/*_standalone.zip 2>/dev/null | head -1 || true)"
 TGZ="$(ls "$OUT"/*_update.tar.gz 2>/dev/null | head -1 || true)"
 if [ -n "$ZIP" ] || [ -n "$TGZ" ]; then
     WORK="$(mktemp -d)"
+    trap 'rm -rf "$WORK"' EXIT
     if [ -n "$ZIP" ]; then ditto -x -k "$ZIP" "$WORK"; else tar -xzf "$TGZ" -C "$WORK"; fi
     STAPLE_APP="$(ls -d "$WORK"/*.app | head -1)"
     xcrun stapler staple "$STAPLE_APP"
@@ -166,10 +168,10 @@ if [ -n "$ZIP" ] || [ -n "$TGZ" ]; then
         (cd "$WORK" && ditto -c -k --keepParent "$(basename "$STAPLE_APP")" "$ZIP")
     fi
     if [ -n "$TGZ" ]; then
-        tar -czf "$TGZ" -C "$WORK" "$(basename "$STAPLE_APP")"
+        # No AppleDouble `._*` entries: the updater would unpack them into the bundle and break its seal.
+        COPYFILE_DISABLE=1 tar -czf "$TGZ" -C "$WORK" "$(basename "$STAPLE_APP")"
         rm -f "$TGZ.sig"   # signed over the old bytes, it would no longer verify
     fi
-    rm -rf "$WORK"
 else
     echo "       No standalone .zip or updater .tar.gz in $OUT, nothing to staple besides the .dmg."
 fi
@@ -177,6 +179,8 @@ fi
 echo "[6/6] Verifying..."
 # What a user's Mac actually evaluates on first open.
 spctl --assess --type open --context context:primary-signature -v "$DMG"
+# The app packed into the .zip and the .tar.gz.
+if [ -n "${STAPLE_APP:-}" ]; then xcrun stapler validate "$STAPLE_APP"; fi
 
 echo ""
 echo "[notarize] Done. Distributable: $DMG"
