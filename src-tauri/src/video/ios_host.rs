@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Marc Hoffmann (b14ckyy)
+// Copyright (C) 2026 Sebastian Kumor
+// Ported from apple_host.rs, Copyright (C) 2026 Marc Hoffmann (b14ckyy)
 
 //! UIKit host for the iOS hole-punch video layer: the iOS twin of `apple_host`, with the same
 //! functions so `apple_sink` serves both. One container UIView per surface, placed directly under

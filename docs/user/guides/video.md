@@ -122,7 +122,7 @@ The same feed can appear in several places at once (they all share one stream):
   snaps it there**, where it **displaces the bottom widget dock** to make room (the dock shrinks by the
   window's size). Drag it away from the corner to un-snap and free-float. The **top-right corner grip
   resizes** it (aspect-locked, touch-friendly).
-  **On a phone** there is a **docked window** instead: fixed to the bottom-right of the map, sized to
+  **On an Android phone** there is a **docked window** instead: fixed to the bottom-right of the map, sized to
   the stream (at most 40 % of the map height or half its width), no dragging. The **corner marker in
   its top-left** toggles between that size and a compact one (two thirds), for the video and the
   swapped-in map alike; the choice is remembered. A **camera button** above the map buttons slides the

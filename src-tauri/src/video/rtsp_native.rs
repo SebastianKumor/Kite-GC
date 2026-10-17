@@ -207,8 +207,8 @@ impl NativeRtsp {
         } else {
             vec![VideoCodec::Mjpeg]
         };
-        // Android, Linux and macOS need no window handle — their sinks reach a host installed at
-        // startup (the SurfaceView over JNI / the GTK layer / the AppKit view under the WebView).
+        // Android, Linux, macOS and iOS need no window handle: their sinks reach a host installed at
+        // startup (the SurfaceView over JNI / the GTK layer / the AppKit or UIKit view under the WebView).
         #[cfg(any(target_os = "android", target_os = "linux", target_os = "macos", target_os = "ios"))]
         let accept = {
             let _ = parent_hwnd;
@@ -479,11 +479,11 @@ impl NativeRtsp {
             {
                 self.sink.lock().unwrap().as_ref().map(|s| {
                     let size = s.picture_size();
-                    // Frames decoded but released unrendered while no surface was on screen —
-                    // the Android sink's off-screen mode (PHONE_VIDEO.md D7); 0 elsewhere.
-                    #[cfg(target_os = "android")]
+                    // Frames not shown while no surface was on screen: Android's off-screen mode
+                    // (PHONE_VIDEO.md D7) and the Apple sink with no outputs; 0 elsewhere.
+                    #[cfg(any(target_os = "android", target_os = "macos", target_os = "ios"))]
                     let dropped_hidden = s.frames_dropped_hidden();
-                    #[cfg(not(target_os = "android"))]
+                    #[cfg(not(any(target_os = "android", target_os = "macos", target_os = "ios")))]
                     let dropped_hidden = 0u64;
                     serde_json::json!({
                         "presented": s.frames_presented(),
